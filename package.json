@@ -1,0 +1,27 @@
+{
+  "name": "douyin-creator-archiver",
+  "version": "0.1.0",
+  "description": "Mac-first Douyin creator video/audio archiver for Codex and other AI agents.",
+  "type": "module",
+  "private": false,
+  "bin": {
+    "douyin-creator-archiver": "bin/douyin-creator-archiver.js",
+    "dyca": "bin/douyin-creator-archiver.js"
+  },
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "scripts": {
+    "test": "node --test --test-concurrency=1 test/*.test.js",
+    "doctor": "node bin/douyin-creator-archiver.js doctor"
+  },
+  "keywords": [
+    "douyin",
+    "macos",
+    "codex",
+    "cdp",
+    "archiver"
+  ],
+  "license": "MIT",
+  "dependencies": {}
+}
