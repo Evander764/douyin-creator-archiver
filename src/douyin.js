@@ -538,12 +538,23 @@ async function scrollSearchResults(client) {
             && rect.width > 300;
         })
         .sort((a, b) => b.clientHeight - a.clientHeight);
-      const target = candidates[0];
-      if (!target) return { ok: false, reason: 'scroll_container_not_found' };
+      const root = document.scrollingElement || document.documentElement;
+      const target = candidates[0] || (root.scrollHeight > root.clientHeight + 200 ? root : null);
+      if (!target) return { ok: false, reason: 'scroll_container_not_found', at_end: true };
       const before = target.scrollTop;
       target.scrollTop = Math.min(target.scrollHeight, target.scrollTop + Math.max(target.clientHeight * 2.5, 1600));
       target.dispatchEvent(new Event('scroll', { bubbles: true }));
-      return { ok: true, before, after: target.scrollTop, scroll_height: target.scrollHeight, client_height: target.clientHeight };
+      const after = target.scrollTop;
+      return {
+        ok: true,
+        target: target === root ? 'document' : 'nested',
+        before,
+        after,
+        moved: after > before,
+        at_end: after + target.clientHeight >= target.scrollHeight - 8,
+        scroll_height: target.scrollHeight,
+        client_height: target.clientHeight,
+      };
     })()
   `);
 }
@@ -675,14 +686,15 @@ export async function collectKeywordSearchBatch({
             stopReason = 'scan_limit_reached';
             break;
           }
-          stableRounds = observed.size === before ? stableRounds + 1 : 0;
-          if (stableRounds >= 6) {
+          const scroll = await scrollSearchResults(client);
+          debugSearch(`scroll keyword=${keyword} ok=${scroll?.ok} before=${scroll?.before ?? 'n/a'} after=${scroll?.after ?? 'n/a'}`);
+          if (!scroll?.ok) throw new Error(`Douyin search scroll failed: ${scroll?.reason || 'unknown'}`);
+          await sleep(Math.max(500, Number(scrollDelayMs || 0)));
+          stableRounds = observed.size === before && scroll.at_end && !scroll.moved ? stableRounds + 1 : 0;
+          if (stableRounds >= 3) {
             stopReason = 'results_exhausted';
             break;
           }
-          const scroll = await scrollSearchResults(client);
-          debugSearch(`scroll keyword=${keyword} ok=${scroll?.ok} before=${scroll?.before ?? 'n/a'} after=${scroll?.after ?? 'n/a'}`);
-          await sleep(Math.max(500, Number(scrollDelayMs || 0)));
         }
         if (parsedResponses > 0) break;
       }
