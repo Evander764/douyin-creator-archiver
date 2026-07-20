@@ -284,7 +284,7 @@ test('qualified item transaction applies ingestion before browser back and verif
       if (expression.includes('const anchor =')) {
         events.push('open');
         page = 'detail';
-        return { ok: true, href: 'https://www.douyin.com/jingxuan/search/%23创业', scroll_top: 321 };
+        return { ok: true, href: 'https://www.douyin.com/jingxuan/search/%23创业', scroll_top: 321, click_point: { x: 10, y: 20 } };
       }
       if (expression.includes("history.back()")) {
         events.push('back');
@@ -320,7 +320,11 @@ test('qualified item transaction applies ingestion before browser back and verif
       }
       throw new Error(`Unexpected expression: ${expression}`);
     },
-    async send(method) {
+    async send(method, params) {
+      if (method === 'Input.dispatchMouseEvent') {
+        events.push(`mouse-${params.type}`);
+        return {};
+      }
       if (method === 'Target.createTarget') {
         events.push('backup-tab');
         return { targetId: 'backup-1' };
@@ -342,7 +346,7 @@ test('qualified item transaction applies ingestion before browser back and verif
     },
   });
   assert.equal(result.processed, true);
-  assert.deepEqual(events, ['open', 'backup-tab', 'ingest', 'back', 'restore-scroll']);
+  assert.deepEqual(events, ['open', 'mouse-mouseMoved', 'mouse-mousePressed', 'mouse-mouseReleased', 'backup-tab', 'ingest', 'back', 'restore-scroll']);
 });
 
 test('qualified item transaction returns through browser history when a note adds a second detail entry', async () => {

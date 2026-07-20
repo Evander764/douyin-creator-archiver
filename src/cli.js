@@ -32,7 +32,7 @@ function usage() {
 Usage:
   dyca doctor
   dyca login [--profile-dir PATH] [--port 9533]
-  dyca search-keywords --keywords-file FILE [--out DIR] [--target-per-keyword 1] [--max-scanned-per-keyword 200] [--min-red-hearts 1000] [--within-days 120] [--qualified-hook SCRIPT] [--hook-concurrency 2]
+  dyca search-keywords --keywords-file FILE [--out DIR] [--target-per-keyword 1] [--max-scanned-per-keyword 200] [--min-red-hearts 1000] [--within-days 120] [--exclude-terms "刘思毅,群响刘老板"] [--exclude-video-ids IDS] [--qualified-hook SCRIPT] [--hook-concurrency 2]
   dyca list --creator-url URL [--out DIR] [--limit N] [--min-red-hearts 1000]
   dyca archive --creator-url URL [--out DIR] [--limit N] [--min-red-hearts 1000] [--mode audio|video|both] [--transcribe true --whisper-model PATH]
   dyca archive-urls --input ROWS.jsonl [--out DIR] [--limit N] [--min-red-hearts 1000] [--mode audio|video|both] [--transcribe true --whisper-model PATH]
@@ -587,6 +587,8 @@ async function commandSearchKeywords(args) {
     maxScannedPerKeyword: positiveInteger(args['max-scanned-per-keyword'], 200, '--max-scanned-per-keyword', 5000),
     minRedHearts: minimumRedHearts(args),
     withinDays: positiveInteger(args['within-days'], 120, '--within-days', 3650),
+    excludedTerms: String(args['exclude-terms'] ?? '刘思毅,群响刘老板').split(/[，,\n]/).map((value) => value.trim()).filter(Boolean),
+    excludedVideoIds: String(args['exclude-video-ids'] || '').split(/[，,\n]/).map((value) => value.trim()).filter(Boolean),
     maxScrollRounds: positiveInteger(args['max-scroll-rounds'], 80, '--max-scroll-rounds', 500),
     scrollDelayMs: Math.max(500, Number(args['scroll-delay-ms'] || 2500)),
     responseWaitMs: Math.max(3000, Number(args['response-wait-ms'] || 15000)),

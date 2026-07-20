@@ -103,10 +103,21 @@ async function openQualifiedVideo(client, item, searchQuery) {
     history.pushState({ ...checkpointState, __dyca_search_checkpoint: true }, document.title, location.href);
     target.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'instant' });
     if (anchor) anchor.removeAttribute('target');
-    target.click();
-    return { ok: true, opened_by: anchor ? 'visible_result_link' : 'visible_result_card', ...before };
+    const rect = target.getBoundingClientRect();
+    return {
+      ok: true,
+      opened_by: anchor ? 'visible_result_link' : 'visible_result_card',
+      click_point: { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 },
+      ...before,
+    };
   })()`);
   if (!origin?.ok) throw new Error(`Douyin qualified-item open failed: ${origin?.reason || 'unknown'}`);
+  if (origin.click_point && typeof client.send === 'function') {
+    const { x, y } = origin.click_point;
+    await client.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y });
+    await client.send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 1 });
+    await client.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 1 });
+  }
   const deadline = Date.now() + 30000;
   while (Date.now() < deadline) {
     const state = await client.evaluate(`({ href: location.href, ready: location.href.includes(${JSON.stringify(id)}) })`);
@@ -185,12 +196,20 @@ export async function processQualifiedItemTransaction(client, item, {
   withinDays = 120,
   capturedAt = new Date().toISOString(),
   onBackupCreated = null,
+  excludedTerms = [],
+  excludedVideoIds = [],
 } = {}) {
   const origin = await openQualifiedVideo(client, item, searchQuery);
   try {
     const detail = await fetchStructuredVideoDetailWithRetry(client, item.url, item);
     if (!detail.ok) {
       return { processed: false, rejected_reason: detail.error || 'structured_detail_unavailable' };
+    }
+    if (new Set(excludedVideoIds.map(String)).has(String(detail.item.id))) {
+      return { processed: false, rejected_reason: 'excluded_video_id' };
+    }
+    if (itemMatchesExcludedTerms(detail.item, excludedTerms)) {
+      return { processed: false, rejected_reason: 'excluded_term' };
     }
     const verification = applyKeywordSearchStandard([detail.item], {
       keyword,
@@ -370,6 +389,14 @@ export function itemMatchesKeyword(item, keyword = '') {
     return new RegExp(`(^|[^a-z0-9])${escaped}(?=$|[^a-z0-9])`, 'i').test(haystack);
   }
   return haystack.includes(needle);
+}
+
+export function itemMatchesExcludedTerms(item, excludedTerms = []) {
+  const haystack = `${item?.author_name || ''} ${item?.title || ''} ${item?.description || ''}`.normalize('NFKC').toLowerCase();
+  return excludedTerms.some((term) => {
+    const needle = compact(term).normalize('NFKC').toLowerCase();
+    return Boolean(needle && haystack.includes(needle));
+  });
 }
 
 export function keywordSearchAttemptLimit(resumeCurrent = false) {
@@ -815,6 +842,8 @@ export async function collectKeywordSearchBatch({
   onQualified = null,
   resumeCurrent = false,
   seedQualifiedItems = [],
+  excludedTerms = [],
+  excludedVideoIds = [],
 } = {}) {
   const normalizedKeywords = [...new Set(keywords.map((value) => compact(value)).filter(Boolean))];
   if (!normalizedKeywords.length) throw new Error('At least one keyword is required');
@@ -847,6 +876,7 @@ export async function collectKeywordSearchBatch({
     const keywordReports = [];
     const qualifiedItems = [];
     const scannedItems = [];
+    const explicitlyExcludedIds = new Set(excludedVideoIds.map(String));
     for (let keywordIndex = 0; keywordIndex < normalizedKeywords.length; keywordIndex += 1) {
       const keyword = normalizedKeywords[keywordIndex];
       const searchQuery = keyword.startsWith('#') ? keyword : `#${keyword}`;
@@ -860,6 +890,14 @@ export async function collectKeywordSearchBatch({
       );
       const verifiedQualifiedItems = new Map(observed);
       const attemptedCandidateIds = new Set(observed.keys());
+      const previouslyAcceptedIds = new Set(qualifiedItems.map((entry) => String(entry.id || parseDouyinVideoId(entry.url) || '')));
+      const applyExclusion = (entry) => {
+        const id = String(entry.id || parseDouyinVideoId(entry.url) || '');
+        const exclusionReason = explicitlyExcludedIds.has(id) || previouslyAcceptedIds.has(id)
+          ? 'excluded_video_id'
+          : (itemMatchesExcludedTerms(entry, excludedTerms) ? 'excluded_term' : null);
+        return exclusionReason ? { ...entry, red_heart_count: null, exclusion_reason: exclusionReason } : entry;
+      };
       let parsedResponses = 0;
       let roundsCompleted = 0;
       let searchAttempts = 0;
@@ -901,12 +939,12 @@ export async function collectKeywordSearchBatch({
           parsedResponses += drained.parsed_responses;
           const before = observed.size;
           for (const item of drained.items) {
-            if (item.id && !observed.has(item.id)) observed.set(item.id, item);
+            if (item.id && !observed.has(item.id)) observed.set(item.id, applyExclusion(item));
           }
           const cardItems = await collectVisibleSearchCards(client, capturedAt);
           const visibleCardIds = new Set(cardItems.map((item) => String(item.id)));
           for (const item of cardItems) {
-            if (item.id && !observed.has(item.id)) observed.set(item.id, item);
+            if (item.id && !observed.has(item.id)) observed.set(item.id, applyExclusion(item));
           }
           while (verifiedQualifiedItems.size < targetPerKeyword) {
             const qualifiedItem = selectVisibleQualifiedCandidate(
@@ -932,6 +970,8 @@ export async function collectKeywordSearchBatch({
               minRedHearts,
               withinDays,
               capturedAt,
+              excludedTerms,
+              excludedVideoIds: [...explicitlyExcludedIds, ...previouslyAcceptedIds],
               onBackupCreated: (backup) => onProgress?.({ phase: 'backup_tab_created', keyword, ...backup }),
             });
             if (transaction.processed) {
@@ -1015,6 +1055,8 @@ export async function collectKeywordSearchBatch({
         search_attempts: searchAttempts,
         parsed_search_responses: parsedResponses,
         observed_unique_count: observed.size,
+        excluded_term_count: [...observed.values()].filter((item) => item.exclusion_reason === 'excluded_term').length,
+        excluded_video_id_count: [...observed.values()].filter((item) => item.exclusion_reason === 'excluded_video_id').length,
         resumed_from_existing_results: resumeThisKeyword,
         ...selection.standard,
         qualified_count: verifiedQualifiedItems.size,
