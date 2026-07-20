@@ -371,6 +371,10 @@ export function keywordSearchAttemptLimit(resumeCurrent = false) {
   return resumeCurrent ? 1 : 2;
 }
 
+export function isTransientSearchScrollFailure(reason = '') {
+  return reason === 'scroll_container_not_found';
+}
+
 export function applyKeywordSearchStandard(items = [], {
   keyword = '',
   minRedHearts = 1000,
@@ -881,6 +885,7 @@ export async function collectKeywordSearchBatch({
         if (!resumeThisKeyword || attempt > 1) observed = new Map();
         parsedResponses = 0;
         let stableRounds = 0;
+        let transientScrollRounds = 0;
         roundsCompleted = 0;
         for (let round = 0; round < maxScrollRounds; round += 1) {
           roundsCompleted = round + 1;
@@ -966,7 +971,19 @@ export async function collectKeywordSearchBatch({
           }
           const scroll = await scrollSearchResults(client);
           debugSearch(`scroll keyword=${keyword} ok=${scroll?.ok} before=${scroll?.before ?? 'n/a'} after=${scroll?.after ?? 'n/a'}`);
-          if (!scroll?.ok) throw new Error(`Douyin search scroll failed: ${scroll?.reason || 'unknown'}`);
+          if (!scroll?.ok) {
+            if (!isTransientSearchScrollFailure(scroll?.reason)) {
+              throw new Error(`Douyin search scroll failed: ${scroll?.reason || 'unknown'}`);
+            }
+            transientScrollRounds += 1;
+            await sleep(Math.max(500, Number(scrollDelayMs || 0)));
+            if (transientScrollRounds >= 10) {
+              stopReason = 'scroll_stalled_before_scan_limit';
+              break;
+            }
+            continue;
+          }
+          transientScrollRounds = 0;
           await sleep(Math.max(500, Number(scrollDelayMs || 0)));
           if (scroll.explicit_end) {
             stopReason = 'results_exhausted';

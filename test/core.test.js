@@ -17,6 +17,7 @@ import {
   parseSearchStreamBody,
   normalizeSearchCardObservation,
   itemMatchesKeyword,
+  isTransientSearchScrollFailure,
   keywordSearchAttemptLimit,
   processQualifiedItemTransaction,
   selectVisibleQualifiedCandidate,
@@ -213,6 +214,11 @@ test('keyword relevance rejects ASCII substrings but accepts real AI terms', () 
 test('resume-current never retries by submitting the same keyword again', () => {
   assert.equal(keywordSearchAttemptLimit(true), 1);
   assert.equal(keywordSearchAttemptLimit(false), 2);
+});
+
+test('a missing scroll container is treated as transient while search cards are still mounting', () => {
+  assert.equal(isTransientSearchScrollFailure('scroll_container_not_found'), true);
+  assert.equal(isTransientSearchScrollFailure('javascript_failed'), false);
 });
 
 test('keyword search standard stops at 1 qualified item or 200 scanned items', () => {
