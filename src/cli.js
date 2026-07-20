@@ -16,7 +16,7 @@ import {
 } from './utils.js';
 import { launchChrome } from './cdp.js';
 import { collectCreatorSnapshot, parseDouyinVideoId, resolveVideoMedia } from './douyin.js';
-import { curlDownload, extractAudio } from './download.js';
+import { curlDownload, downloadAudioWithYtDlp, extractAudio } from './download.js';
 import { transcribeAudio } from './transcribe.js';
 
 const execFileAsync = promisify(execFile);
@@ -212,6 +212,7 @@ async function commandArchive(args) {
     transcribe: parseBool(args.transcribe, false),
     whisperModelPath: String(args['whisper-model'] || process.env.DYCA_WHISPER_MODEL || ''),
     whisperCliPath: String(args['whisper-cli'] || '/opt/homebrew/bin/whisper-cli'),
+    ytDlpPath: String(args['yt-dlp-path'] || process.env.DYCA_YT_DLP || 'yt-dlp'),
   });
   console.log(JSON.stringify({ ok: report.ok, total: report.total, succeeded: report.succeeded, failed: report.failed, outDir }, null, 2));
 }
@@ -233,6 +234,7 @@ export async function archiveVideoRows({
   transcribe = false,
   whisperModelPath = '',
   whisperCliPath = '/opt/homebrew/bin/whisper-cli',
+  ytDlpPath = 'yt-dlp',
 }) {
   if (transcribe && mode === 'video') throw new Error('--transcribe requires --mode audio or --mode both');
   ensureDir(options.profileDir);
@@ -272,21 +274,53 @@ export async function archiveVideoRows({
     let transcriptOk = !transcribe;
     try {
       console.error(`archive-url ${index + 1}/${videos.length}: ${item.title || item.url}`);
-      const resolved = item.download_url
-        ? {
-          mediaUrl: item.download_url,
-          headers: { referer: 'https://www.douyin.com/' },
-          source: 'structured-download',
+      if (mode === 'audio') {
+        try {
+          const audio = await downloadAudioWithYtDlp(item.url, audioPath, {
+            profileDir: options.profileDir,
+            ytDlpPath,
+          });
+          mediaOk = true;
+          result.mediaSource = 'yt-dlp-audio';
+          result.audioBytes = audio.bytes;
+        } catch (ytDlpError) {
+          result.ytDlpError = ytDlpError.message;
+          const resolved = item.download_url
+            ? {
+              mediaUrl: item.download_url,
+              headers: { referer: 'https://www.douyin.com/' },
+              source: 'structured-download',
+            }
+            : await resolveVideoMedia({ videoUrl: item.url, ...options });
+          let downloaded;
+          let audio;
+          try {
+            downloaded = await curlDownload(resolved.mediaUrl, tempVideoPath, { headers: resolved.headers });
+            audio = await extractAudio(tempVideoPath, audioPath);
+          } finally {
+            rmSync(tempVideoPath, { force: true });
+            rmSync(`${tempVideoPath}.partial`, { force: true });
+          }
+          mediaOk = true;
+          result.mediaSource = resolved.source;
+          result.downloadedBytes = downloaded.bytes;
+          result.audioBytes = audio.bytes;
         }
-        : await resolveVideoMedia({ videoUrl: item.url, ...options });
-      const downloaded = await curlDownload(resolved.mediaUrl, tempVideoPath, { headers: resolved.headers });
-      let audio = null;
-      if (mode === 'audio' || mode === 'both') audio = await extractAudio(tempVideoPath, audioPath);
-      if (mode === 'audio') rmSync(tempVideoPath, { force: true });
-      mediaOk = true;
-      result.mediaSource = resolved.source;
-      result.downloadedBytes = downloaded.bytes;
-      result.audioBytes = audio?.bytes || null;
+      } else {
+        const resolved = item.download_url
+          ? {
+            mediaUrl: item.download_url,
+            headers: { referer: 'https://www.douyin.com/' },
+            source: 'structured-download',
+          }
+          : await resolveVideoMedia({ videoUrl: item.url, ...options });
+        const downloaded = await curlDownload(resolved.mediaUrl, tempVideoPath, { headers: resolved.headers });
+        const audio = mode === 'both' ? await extractAudio(tempVideoPath, audioPath) : null;
+        mediaOk = true;
+        result.mediaSource = resolved.source;
+        result.downloadedBytes = downloaded.bytes;
+        result.audioBytes = audio?.bytes || null;
+      }
     } catch (error) {
       result.mediaError = error.message;
     }
@@ -359,6 +393,7 @@ async function commandArchiveUrls(args) {
     transcribe: parseBool(args.transcribe, false),
     whisperModelPath: String(args['whisper-model'] || process.env.DYCA_WHISPER_MODEL || ''),
     whisperCliPath: String(args['whisper-cli'] || '/opt/homebrew/bin/whisper-cli'),
+    ytDlpPath: String(args['yt-dlp-path'] || process.env.DYCA_YT_DLP || 'yt-dlp'),
   });
   console.log(JSON.stringify({ ok: report.ok, total: report.total, succeeded: report.succeeded, failed: report.failed, outDir }, null, 2));
 }

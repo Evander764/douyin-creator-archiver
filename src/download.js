@@ -57,3 +57,34 @@ export async function extractAudio(videoPath, audioPath, { ffmpegPath = '/opt/ho
   return { ok: true, path: audioPath, bytes: statSync(audioPath).size };
 }
 
+export function buildYtDlpAudioArgs(videoUrl, audioPath, profileDir) {
+  const outputTemplate = String(audioPath).replace(/\.m4a$/i, '.%(ext)s');
+  return [
+    '--cookies-from-browser', `chrome:${profileDir}`,
+    '-f', 'bestaudio/best',
+    '-x',
+    '--audio-format', 'm4a',
+    '--no-write-thumbnail',
+    '--no-write-info-json',
+    '--no-playlist',
+    '--no-update',
+    '-o', outputTemplate,
+    videoUrl,
+  ];
+}
+
+export async function downloadAudioWithYtDlp(videoUrl, audioPath, {
+  profileDir,
+  ytDlpPath = 'yt-dlp',
+  timeoutMs = 20 * 60 * 1000,
+} = {}) {
+  ensureDir(dirname(audioPath));
+  rmSync(audioPath, { force: true });
+  await execFileAsync(ytDlpPath, buildYtDlpAudioArgs(videoUrl, audioPath, profileDir), {
+    encoding: 'utf8',
+    timeout: timeoutMs,
+    maxBuffer: 8 * 1024 * 1024,
+  });
+  if (!existsSync(audioPath)) throw new Error('yt-dlp did not generate the expected m4a output.');
+  return { ok: true, path: audioPath, bytes: statSync(audioPath).size };
+}

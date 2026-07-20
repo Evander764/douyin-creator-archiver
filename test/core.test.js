@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parseArgs, sanitizeSegment } from '../src/utils.js';
 import { normalizeStructuredVideo, normalizeVideoUrl, parseCreatorPostPayload, parseDouyinVideoId } from '../src/douyin.js';
+import { buildYtDlpAudioArgs } from '../src/download.js';
 import { filterByMinimumLikes, writeArchiveReport } from '../src/cli.js';
 
 test('parseDouyinVideoId supports video and modal urls', () => {
@@ -86,4 +87,13 @@ test('1000-like standard is inclusive and excludes missing metrics', () => {
   assert.equal(result.standard.qualified_count, 2);
   assert.equal(result.standard.below_threshold_count, 1);
   assert.equal(result.standard.missing_like_count, 1);
+});
+
+test('yt-dlp audio args use the dedicated Chrome profile and remove source video', () => {
+  const args = buildYtDlpAudioArgs('https://www.douyin.com/video/123456789', '/tmp/audio.m4a', '/tmp/profile');
+  assert.deepEqual(args.slice(0, 2), ['--cookies-from-browser', 'chrome:/tmp/profile']);
+  assert.ok(args.includes('-x'));
+  assert.ok(args.includes('m4a'));
+  assert.ok(args.includes('/tmp/audio.%(ext)s'));
+  assert.equal(args.at(-1), 'https://www.douyin.com/video/123456789');
 });
