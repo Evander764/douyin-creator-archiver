@@ -15,7 +15,12 @@ import {
   sleep,
 } from './utils.js';
 import { launchChrome } from './cdp.js';
-import { collectCreatorSnapshot, parseDouyinVideoId, resolveVideoMedia } from './douyin.js';
+import {
+  collectCreatorSnapshot,
+  collectKeywordSearchBatch,
+  parseDouyinVideoId,
+  resolveVideoMedia,
+} from './douyin.js';
 import { curlDownload, downloadAudioWithYtDlp, downloadMusicPlayUrl, extractAudio } from './download.js';
 import { transcribeAudio } from './transcribe.js';
 
@@ -27,57 +32,62 @@ function usage() {
 Usage:
   dyca doctor
   dyca login [--profile-dir PATH] [--port 9533]
-  dyca list --creator-url URL [--out DIR] [--limit N] [--min-likes 1000]
-  dyca archive --creator-url URL [--out DIR] [--limit N] [--min-likes 1000] [--mode audio|video|both] [--transcribe true --whisper-model PATH]
-  dyca archive-urls --input ROWS.jsonl [--out DIR] [--limit N] [--min-likes 1000] [--mode audio|video|both] [--transcribe true --whisper-model PATH]
+  dyca search-keywords --keywords-file FILE [--out DIR] [--target-per-keyword 10] [--max-scanned-per-keyword 200] [--min-red-hearts 1000] [--within-days 7] [--qualified-hook SCRIPT]
+  dyca list --creator-url URL [--out DIR] [--limit N] [--min-red-hearts 1000]
+  dyca archive --creator-url URL [--out DIR] [--limit N] [--min-red-hearts 1000] [--mode audio|video|both] [--transcribe true --whisper-model PATH]
+  dyca archive-urls --input ROWS.jsonl [--out DIR] [--limit N] [--min-red-hearts 1000] [--mode audio|video|both] [--transcribe true --whisper-model PATH]
 `;
 }
 
-function minimumLikes(args) {
-  const value = Number(args['min-likes'] ?? 1000);
-  if (!Number.isFinite(value) || value < 0) throw new Error('--min-likes must be a non-negative number');
+function minimumRedHearts(args) {
+  const value = Number(args['min-red-hearts'] ?? args['min-likes'] ?? 1000);
+  if (!Number.isFinite(value) || value < 0) throw new Error('--min-red-hearts must be a non-negative number');
   return Math.floor(value);
 }
 
-function numericLikeCount(value) {
+function numericMetric(value) {
   if (value === null || value === undefined || value === '') return null;
   const parsed = Number(String(value).replace(/,/g, '').trim());
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
 }
 
-export function filterByMinimumLikes(videos = [], threshold = 1000) {
+export function filterByMinimumRedHearts(videos = [], threshold = 1000) {
   const qualified = [];
-  let belowThreshold = 0;
-  let missingLikeCount = 0;
+  let atOrBelowThreshold = 0;
+  let missingRedHeartCount = 0;
   for (const video of videos) {
-    const likeCount = numericLikeCount(video.like_count);
-    if (likeCount === null) {
-      missingLikeCount += 1;
-    } else if (likeCount < threshold) {
-      belowThreshold += 1;
+    const redHeartCount = numericMetric(video.red_heart_count ?? video.like_count);
+    if (redHeartCount === null) {
+      missingRedHeartCount += 1;
+    } else if (redHeartCount <= threshold) {
+      atOrBelowThreshold += 1;
     } else {
-      qualified.push({ ...video, like_count: likeCount });
+      qualified.push({ ...video, red_heart_count: redHeartCount });
     }
   }
   return {
     videos: qualified,
     standard: {
-      field: 'like_count',
-      operator: '>=',
-      minimum: threshold,
+      field: 'statistics.digg_count',
+      operator: '>',
+      threshold,
       observed_count: videos.length,
       qualified_count: qualified.length,
-      below_threshold_count: belowThreshold,
-      missing_like_count: missingLikeCount,
+      at_or_below_threshold_count: atOrBelowThreshold,
+      missing_red_heart_count: missingRedHeartCount,
     },
   };
 }
 
-function applyLikeStandard(snapshot, threshold) {
-  const filtered = filterByMinimumLikes(snapshot.videos, threshold);
+export function filterByMinimumLikes(videos = [], threshold = 1000) {
+  return filterByMinimumRedHearts(videos, threshold);
+}
+
+function applyRedHeartStandard(snapshot, threshold) {
+  const filtered = filterByMinimumRedHearts(snapshot.videos, threshold);
   return {
     videos: filtered.videos,
-    listing: { ...snapshot.listing, like_standard: filtered.standard },
+    listing: { ...snapshot.listing, red_heart_standard: filtered.standard },
   };
 }
 
@@ -169,7 +179,7 @@ async function commandList(args) {
   const outDir = resolve(String(args.out || './douyin-archive'));
   const limit = Math.max(1, Math.min(Number(args.limit || 100), 5000));
   const scrollRounds = Math.max(1, Math.min(Number(args['scroll-rounds'] || 80), 500));
-  const minLikes = minimumLikes(args);
+  const minRedHearts = minimumRedHearts(args);
   const options = commonOptions(args);
   ensureDir(options.profileDir);
   const snapshot = await collectCreatorSnapshot({
@@ -179,7 +189,7 @@ async function commandList(args) {
     ...options,
     onProgress: logCollectionProgress,
   });
-  const selected = applyLikeStandard(snapshot, minLikes);
+  const selected = applyRedHeartStandard(snapshot, minRedHearts);
   writeVideoIndex(outDir, selected.videos, selected.listing);
   console.log(JSON.stringify({ ok: true, count: selected.videos.length, listing: selected.listing, outDir }, null, 2));
 }
@@ -191,7 +201,7 @@ async function commandArchive(args) {
   if (!['audio', 'video', 'both'].includes(mode)) throw new Error('--mode must be audio, video, or both');
   const limit = Math.max(1, Math.min(Number(args.limit || 100), 5000));
   const delayMs = Math.max(0, Number(args['delay-ms'] || 2500));
-  const minLikes = minimumLikes(args);
+  const minRedHearts = minimumRedHearts(args);
   const options = commonOptions(args);
   const snapshot = await collectCreatorSnapshot({
     creatorUrl,
@@ -200,7 +210,7 @@ async function commandArchive(args) {
     ...options,
     onProgress: logCollectionProgress,
   });
-  const selected = applyLikeStandard(snapshot, minLikes);
+  const selected = applyRedHeartStandard(snapshot, minRedHearts);
   const report = await archiveVideoRows({
     videos: selected.videos,
     outDir,
@@ -208,7 +218,7 @@ async function commandArchive(args) {
     delayMs,
     options,
     origin: { command: 'archive', creatorUrl, listing: selected.listing },
-    downloadCovers: parseBool(args.covers, true),
+    downloadCovers: parseBool(args.covers, false),
     transcribe: parseBool(args.transcribe, false),
     whisperModelPath: String(args['whisper-model'] || process.env.DYCA_WHISPER_MODEL || ''),
     whisperCliPath: String(args['whisper-cli'] || '/opt/homebrew/bin/whisper-cli'),
@@ -240,7 +250,7 @@ export async function archiveVideoRows({
   ensureDir(options.profileDir);
   ensureDir(outDir);
   ensureDir(join(outDir, 'logs'));
-  ensureDir(join(outDir, 'covers'));
+  if (downloadCovers) ensureDir(join(outDir, 'covers'));
   ensureDir(join(outDir, 'transcripts'));
   writeVideoIndex(outDir, videos, origin?.listing || null);
   const report = {
@@ -382,14 +392,14 @@ async function commandArchiveUrls(args) {
   if (!['audio', 'video', 'both'].includes(mode)) throw new Error('--mode must be audio, video, or both');
   const limit = Math.max(1, Math.min(Number(args.limit || 100), 5000));
   const delayMs = Math.max(0, Number(args['delay-ms'] || 2500));
-  const minLikes = minimumLikes(args);
+  const minRedHearts = minimumRedHearts(args);
   const options = commonOptions(args);
   const rows = readJsonlRows(inputPath);
   const candidates = rowsToVideos(rows, {
     urlField: String(args['url-field'] || 'source_url'),
     titleField: String(args['title-field'] || 'title'),
   });
-  const filtered = filterByMinimumLikes(candidates, minLikes);
+  const filtered = filterByMinimumRedHearts(candidates, minRedHearts);
   const videos = filtered.videos.slice(0, limit);
   const report = await archiveVideoRows({
     videos,
@@ -397,14 +407,119 @@ async function commandArchiveUrls(args) {
     mode,
     delayMs,
     options,
-    origin: { command: 'archive-urls', inputPath, like_standard: { ...filtered.standard, selected_count: videos.length } },
-    downloadCovers: parseBool(args.covers, true),
+    origin: { command: 'archive-urls', inputPath, red_heart_standard: { ...filtered.standard, selected_count: videos.length } },
+    downloadCovers: parseBool(args.covers, false),
     transcribe: parseBool(args.transcribe, false),
     whisperModelPath: String(args['whisper-model'] || process.env.DYCA_WHISPER_MODEL || ''),
     whisperCliPath: String(args['whisper-cli'] || '/opt/homebrew/bin/whisper-cli'),
     ytDlpPath: String(args['yt-dlp-path'] || process.env.DYCA_YT_DLP || 'yt-dlp'),
   });
   console.log(JSON.stringify({ ok: report.ok, total: report.total, succeeded: report.succeeded, failed: report.failed, outDir }, null, 2));
+}
+
+function parseKeywords(args) {
+  const keywords = [];
+  if (args['keywords-file']) {
+    keywords.push(...readFileSync(resolve(String(args['keywords-file'])), 'utf8').split(/\r?\n/));
+  }
+  if (args.keywords) keywords.push(...String(args.keywords).split(/[，,\n]/));
+  return [...new Set(keywords.map((value) => String(value || '').trim()).filter((value) => value && !value.startsWith('#')))];
+}
+
+function positiveInteger(value, fallback, name, maximum = 10000) {
+  const parsed = Number(value ?? fallback);
+  if (!Number.isInteger(parsed) || parsed < 1 || parsed > maximum) throw new Error(`${name} must be an integer from 1 to ${maximum}`);
+  return parsed;
+}
+
+function logKeywordProgress(event = {}) {
+  if (event.phase === 'keyword_start') {
+    console.error(`keyword ${event.keyword_index}/${event.keyword_total}: ${event.keyword}`);
+  } else if (event.phase === 'keyword_scan') {
+    console.error(`scan ${event.keyword}: round=${event.round} scanned=${event.scanned} qualified=${event.qualified}`);
+  } else if (event.phase === 'keyword_done') {
+    console.error(`done ${event.keyword}: scanned=${event.scanned_count} qualified=${event.qualified_count} stop=${event.stop_reason}`);
+  } else if (event.phase === 'keyword_retry') {
+    console.error(`retry ${event.keyword}: attempt=${event.attempt}`);
+  } else if (event.phase === 'qualified_start') {
+    console.error(`ingest ${event.keyword}: ${event.item.id} start`);
+  } else if (event.phase === 'qualified_done') {
+    console.error(`ingest ${event.keyword}: ${event.item.id} applied; browser back verified`);
+  }
+}
+
+async function runQualifiedHook(script, item, outDir, timeoutMs) {
+  const itemId = parseDouyinVideoId(item.url) || item.id;
+  const transactionDir = join(outDir, 'transactions', String(itemId));
+  ensureDir(transactionDir);
+  const itemPath = join(transactionDir, 'qualified-item.json');
+  writeFileSync(itemPath, `${JSON.stringify(item, null, 2)}\n`);
+  const { stdout, stderr } = await execFileAsync(process.execPath, [
+    script,
+    '--item-json', itemPath,
+    '--transaction-dir', transactionDir,
+  ], { encoding: 'utf8', timeout: timeoutMs, maxBuffer: 20 * 1024 * 1024 });
+  const receipt = {
+    ok: true,
+    item_id: String(itemId),
+    completed_at: new Date().toISOString(),
+    stdout: String(stdout || '').trim(),
+    stderr: String(stderr || '').trim(),
+  };
+  writeFileSync(join(transactionDir, 'hook-receipt.json'), `${JSON.stringify(receipt, null, 2)}\n`);
+  return receipt;
+}
+
+function writeKeywordSearchResults(outDir, result, runStatus = 'complete') {
+  ensureDir(outDir);
+  ensureDir(join(outDir, 'logs'));
+  writeFileSync(join(outDir, 'qualified-content.json'), `${JSON.stringify(result.qualified_items, null, 2)}\n`);
+  writeFileSync(join(outDir, 'qualified-content.jsonl'), `${result.qualified_items.map((item) => JSON.stringify(item)).join('\n')}\n`);
+  writeFileSync(join(outDir, 'logs', 'scanned-content.jsonl'), `${result.scanned_items.map((item) => JSON.stringify(item)).join('\n')}\n`);
+  const report = {
+    run_status: runStatus,
+    captured_at: result.captured_at,
+    keywords: result.keywords,
+    keyword_count: result.keywords.length,
+    total_scanned_count: result.scanned_items.length,
+    total_qualified_count: result.qualified_items.length,
+    keyword_reports: result.keyword_reports,
+  };
+  writeFileSync(join(outDir, 'keyword-report.json'), `${JSON.stringify(report, null, 2)}\n`);
+  return report;
+}
+
+async function commandSearchKeywords(args) {
+  const keywords = parseKeywords(args);
+  if (!keywords.length) throw new Error('Provide --keywords-file FILE or --keywords "词1,词2"');
+  const outDir = resolve(String(args.out || './douyin-keyword-search'));
+  const options = commonOptions(args);
+  ensureDir(options.profileDir);
+  const qualifiedHook = args['qualified-hook'] ? resolve(String(args['qualified-hook'])) : '';
+  if (qualifiedHook && !existsSync(qualifiedHook)) throw new Error(`--qualified-hook was not found: ${qualifiedHook}`);
+  const result = await collectKeywordSearchBatch({
+    keywords,
+    targetPerKeyword: positiveInteger(args['target-per-keyword'], 10, '--target-per-keyword', 100),
+    maxScannedPerKeyword: positiveInteger(args['max-scanned-per-keyword'], 200, '--max-scanned-per-keyword', 5000),
+    minRedHearts: minimumRedHearts(args),
+    withinDays: positiveInteger(args['within-days'], 7, '--within-days', 3650),
+    maxScrollRounds: positiveInteger(args['max-scroll-rounds'], 80, '--max-scroll-rounds', 500),
+    scrollDelayMs: Math.max(500, Number(args['scroll-delay-ms'] || 2500)),
+    responseWaitMs: Math.max(3000, Number(args['response-wait-ms'] || 15000)),
+    ...options,
+    onProgress: logKeywordProgress,
+    onCheckpoint: (checkpoint) => writeKeywordSearchResults(outDir, checkpoint, 'in_progress'),
+    onQualified: qualifiedHook
+      ? (item) => runQualifiedHook(
+        qualifiedHook,
+        item,
+        outDir,
+        Math.max(60_000, Number(args['qualified-hook-timeout-ms'] || 30 * 60 * 1000)),
+      )
+      : null,
+  });
+  const report = writeKeywordSearchResults(outDir, result);
+  console.log(JSON.stringify({ ok: true, outDir, ...report }, null, 2));
 }
 
 export async function main(argv = []) {
@@ -416,6 +531,7 @@ export async function main(argv = []) {
   }
   if (command === 'doctor') return commandDoctor(args);
   if (command === 'login') return commandLogin(args);
+  if (command === 'search-keywords') return commandSearchKeywords(args);
   if (command === 'list') return commandList(args);
   if (command === 'archive') return commandArchive(args);
   if (command === 'archive-urls') return commandArchiveUrls(args);

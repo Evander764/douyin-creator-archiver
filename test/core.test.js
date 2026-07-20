@@ -4,9 +4,18 @@ import { mkdirSync, mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parseArgs, sanitizeSegment } from '../src/utils.js';
-import { normalizeStructuredVideo, normalizeVideoUrl, parseCreatorPostPayload, parseDouyinVideoId } from '../src/douyin.js';
+import {
+  applyKeywordSearchStandard,
+  normalizeStructuredVideo,
+  normalizeVideoUrl,
+  parseCreatorPostPayload,
+  parseDouyinVideoId,
+  parseLengthPrefixedJsonStream,
+  parseSearchStreamBody,
+  processQualifiedItemTransaction,
+} from '../src/douyin.js';
 import { buildYtDlpAudioArgs, selectAudioOnlyFormat, validateAudioDuration, validateAudioOnlyProbe } from '../src/download.js';
-import { filterByMinimumLikes, writeArchiveReport } from '../src/cli.js';
+import { filterByMinimumLikes, filterByMinimumRedHearts, writeArchiveReport } from '../src/cli.js';
 
 test('parseDouyinVideoId supports video and modal urls', () => {
   assert.equal(parseDouyinVideoId('https://www.douyin.com/video/7611095597914918153'), '7611095597914918153');
@@ -40,6 +49,7 @@ test('normalizeStructuredVideo keeps metrics and exposes music.play_url as pure 
     },
     music: { duration: 31, play_url: { url_list: ['https://audio.example/original-sound.m4a'] } },
   });
+  assert.equal(item.red_heart_count, 13);
   assert.equal(item.like_count, 13);
   assert.equal(item.favorite_count, 3);
   assert.equal(item.comment_count, 1);
@@ -94,18 +104,119 @@ test('parseCreatorPostPayload preserves cursor exhaustion evidence', () => {
   assert.equal(page.cursor, 123);
 });
 
-test('1000-like standard is inclusive and excludes missing metrics', () => {
-  const result = filterByMinimumLikes([
-    { id: 'a', like_count: 999 },
-    { id: 'b', like_count: 1000 },
-    { id: 'c', like_count: '1,200' },
-    { id: 'd', like_count: null },
+test('1000-red-heart standard is strict and excludes missing metrics', () => {
+  const result = filterByMinimumRedHearts([
+    { id: 'a', red_heart_count: 999 },
+    { id: 'b', red_heart_count: 1000 },
+    { id: 'c', red_heart_count: '1,200' },
+    { id: 'd', red_heart_count: null },
   ], 1000);
-  assert.deepEqual(result.videos.map((item) => item.id), ['b', 'c']);
-  assert.equal(result.standard.minimum, 1000);
-  assert.equal(result.standard.qualified_count, 2);
-  assert.equal(result.standard.below_threshold_count, 1);
-  assert.equal(result.standard.missing_like_count, 1);
+  assert.deepEqual(result.videos.map((item) => item.id), ['c']);
+  assert.equal(result.standard.threshold, 1000);
+  assert.equal(result.standard.operator, '>');
+  assert.equal(result.standard.qualified_count, 1);
+  assert.equal(result.standard.at_or_below_threshold_count, 2);
+  assert.equal(result.standard.missing_red_heart_count, 1);
+});
+
+test('search stream parser handles byte-length-prefixed UTF-8 JSON frames', () => {
+  const frames = [
+    { status_code: 0, data: [{ aweme_info: { aweme_id: '7611095597914918153', desc: '中文标题', create_time: 1760000000, statistics: { digg_count: 1300 } } }] },
+    { status_code: 0, data: [{ aweme_info: { aweme_id: '7611095597914918154', desc: '第二条', create_time: 1760000100, statistics: { digg_count: 999 } } }] },
+  ];
+  const body = frames.map((frame) => {
+    const json = JSON.stringify(frame);
+    return `${Buffer.byteLength(json, 'utf8').toString(16)}\r\n${json}`;
+  }).join('\r\n');
+  assert.equal(parseLengthPrefixedJsonStream(body).length, 2);
+  const videos = parseSearchStreamBody(body);
+  assert.deepEqual(videos.map((item) => item.id), ['7611095597914918153', '7611095597914918154']);
+  assert.equal(videos[0].red_heart_count, 1300);
+});
+
+test('keyword search standard requires >1000 red hearts and publication within 7 days', () => {
+  const capturedAt = '2026-07-20T12:00:00.000Z';
+  const make = (id, redHeartCount, publishTime) => ({
+    id,
+    url: `https://www.douyin.com/video/${id}`,
+    red_heart_count: redHeartCount,
+    publish_time: publishTime,
+  });
+  const result = applyKeywordSearchStandard([
+    make('7611095597914918101', 1000, '2026-07-20T00:00:00.000Z'),
+    make('7611095597914918102', 1001, '2026-07-13T11:59:59.000Z'),
+    make('7611095597914918103', 1001, '2026-07-13T12:00:00.000Z'),
+    make('7611095597914918104', 5000, null),
+  ], { keyword: '创业', capturedAt, minRedHearts: 1000, withinDays: 7, target: 10, maxScanned: 200 });
+  assert.deepEqual(result.qualified_items.map((item) => item.id), ['7611095597914918103']);
+  assert.equal(result.standard.red_heart_operator, '>');
+  assert.equal(result.standard.red_heart_at_or_below_count, 1);
+  assert.equal(result.standard.outside_time_window_count, 1);
+  assert.equal(result.standard.missing_publish_time_count, 1);
+});
+
+test('keyword search standard stops at 10 qualified items or 200 scanned items', () => {
+  const capturedAt = '2026-07-20T12:00:00.000Z';
+  const eligible = Array.from({ length: 20 }, (_, index) => ({
+    id: String(7611095597914918200n + BigInt(index)),
+    url: `https://www.douyin.com/video/${7611095597914918200n + BigInt(index)}`,
+    red_heart_count: 1001,
+    publish_time: '2026-07-20T00:00:00.000Z',
+  }));
+  const targetStopped = applyKeywordSearchStandard(eligible, { capturedAt, target: 10, maxScanned: 200 });
+  assert.equal(targetStopped.standard.scanned_count, 10);
+  assert.equal(targetStopped.standard.qualified_count, 10);
+  const ineligible = Array.from({ length: 250 }, (_, index) => ({
+    id: String(7611095597914920000n + BigInt(index)),
+    url: `https://www.douyin.com/video/${7611095597914920000n + BigInt(index)}`,
+    red_heart_count: 1000,
+    publish_time: '2026-07-20T00:00:00.000Z',
+  }));
+  const limitStopped = applyKeywordSearchStandard(ineligible, { capturedAt, target: 10, maxScanned: 200 });
+  assert.equal(limitStopped.standard.scanned_count, 200);
+  assert.equal(limitStopped.standard.qualified_count, 0);
+});
+
+test('qualified item transaction applies ingestion before browser back and verifies restored search', async () => {
+  const events = [];
+  let page = 'search';
+  const client = {
+    async evaluate(expression) {
+      if (expression.includes('const anchor =')) {
+        events.push('open');
+        page = 'detail';
+        return { ok: true, href: 'https://www.douyin.com/jingxuan/search/%23创业', scroll_top: 321 };
+      }
+      if (expression.includes("history.back()")) {
+        events.push('back');
+        page = 'search';
+        return undefined;
+      }
+      if (expression.includes('ready: location.href.includes')) {
+        return { href: `https://www.douyin.com/video/7611095597914918153`, ready: page === 'detail' };
+      }
+      if (expression.includes("const input =")) {
+        return { href: 'https://www.douyin.com/jingxuan/search/%23创业', value: '#创业' };
+      }
+      if (expression.includes('root.scrollTop =')) {
+        events.push('restore-scroll');
+        return undefined;
+      }
+      throw new Error(`Unexpected expression: ${expression}`);
+    },
+  };
+  const result = await processQualifiedItemTransaction(client, {
+    id: '7611095597914918153',
+    url: 'https://www.douyin.com/video/7611095597914918153',
+  }, {
+    searchQuery: '#创业',
+    onQualified: async () => {
+      events.push('ingest');
+      return { applied: true };
+    },
+  });
+  assert.equal(result.processed, true);
+  assert.deepEqual(events, ['open', 'ingest', 'back', 'restore-scroll']);
 });
 
 test('yt-dlp audio args use the dedicated Chrome profile and selected audio-only format', () => {

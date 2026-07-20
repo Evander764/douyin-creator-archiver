@@ -1,7 +1,35 @@
-import { spawn } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
+import { promisify } from 'node:util';
 import { DEFAULT_CDP_PORT, DEFAULT_CHROME_PATH, sleep } from './utils.js';
 
 const DEFAULT_WINDOW_BOUNDS = { left: 80, top: 80, width: 1280, height: 900 };
+const execFileAsync = promisify(execFile);
+
+export async function captureFrontmostApplication() {
+  try {
+    const { stdout } = await execFileAsync('/usr/bin/osascript', [
+      '-e',
+      'tell application "System Events" to get bundle identifier of first application process whose frontmost is true',
+    ], { encoding: 'utf8', timeout: 3000 });
+    const bundleId = String(stdout || '').trim();
+    return /^[A-Za-z0-9.-]+$/.test(bundleId) ? bundleId : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function restoreFrontmostApplication(bundleId) {
+  if (!/^[A-Za-z0-9.-]+$/.test(String(bundleId || ''))) return false;
+  try {
+    await execFileAsync('/usr/bin/osascript', [
+      '-e',
+      `tell application id ${JSON.stringify(bundleId)} to activate`,
+    ], { encoding: 'utf8', timeout: 3000 });
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 export async function cdpReady(port = DEFAULT_CDP_PORT) {
   try {
@@ -105,6 +133,18 @@ async function createWindowTarget(port, url) {
   }
 }
 
+async function findReusableTarget(port, urlPattern) {
+  if (!urlPattern) return null;
+  let pattern = null;
+  try { pattern = new RegExp(urlPattern); } catch { return null; }
+  try {
+    const targets = await fetch(`http://127.0.0.1:${port}/json/list`, { signal: AbortSignal.timeout(1000) }).then((res) => res.json());
+    return targets.find((item) => item.type === 'page' && item.webSocketDebuggerUrl && pattern.test(String(item.url || ''))) || null;
+  } catch {
+    return null;
+  }
+}
+
 export async function closeChromeTarget(port, targetId) {
   if (!port || !targetId) return false;
   try {
@@ -126,9 +166,9 @@ export class CDPClient {
     this.commandTimeoutMs = commandTimeoutMs;
   }
 
-  async connect(port, { initialUrl = 'about:blank' } = {}) {
+  async connect(port, { initialUrl = 'about:blank', reuseUrlPattern = null } = {}) {
     this.port = port;
-    const target = await createWindowTarget(port, initialUrl);
+    const target = await findReusableTarget(port, reuseUrlPattern) || await createWindowTarget(port, initialUrl);
     this.targetId = target.id;
     this.ws = new WebSocket(target.webSocketDebuggerUrl);
     await new Promise((resolve, reject) => {
@@ -142,6 +182,10 @@ export class CDPClient {
         reject(new Error('Chrome target WebSocket error'));
       };
       this.ws.onmessage = (event) => this.handleMessage(event);
+      this.ws.onclose = () => {
+        for (const pending of this.pending.values()) pending.reject(new Error('Chrome target closed during command'));
+        this.pending.clear();
+      };
     });
     await this.send('Page.enable');
     await this.send('Runtime.enable');
@@ -166,6 +210,10 @@ export class CDPClient {
   send(method, params = {}, { timeoutMs = this.commandTimeoutMs } = {}) {
     const id = this.msgId++;
     return new Promise((resolve, reject) => {
+      if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+        reject(new Error(`Chrome target is not connected: ${method}`));
+        return;
+      }
       const timer = timeoutMs > 0 ? setTimeout(() => {
         this.pending.delete(id);
         reject(new Error(`Chrome CDP command timed out: ${method}`));
@@ -210,5 +258,14 @@ export class CDPClient {
   async close() {
     try { this.ws?.close(); } catch {}
     return closeChromeTarget(this.port, this.targetId);
+  }
+
+  async disconnect() {
+    try {
+      if (this.ws) this.ws.onclose = null;
+      this.ws?.close();
+    } catch {}
+    this.ws = null;
+    return true;
   }
 }

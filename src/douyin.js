@@ -1,4 +1,9 @@
-import { CDPClient, launchChrome } from './cdp.js';
+import {
+  captureFrontmostApplication,
+  CDPClient,
+  launchChrome,
+  restoreFrontmostApplication,
+} from './cdp.js';
 import { DEFAULT_CDP_PORT, DEFAULT_CHROME_PATH, DEFAULT_PROFILE_DIR, sleep } from './utils.js';
 
 const VIDEO_ID_PATTERN = /douyin\.com\/video\/(\d{6,})|[?&]modal_id=(\d{6,})/i;
@@ -32,6 +37,10 @@ function epochToISO(value) {
   return Number.isNaN(date.getTime()) ? null : date.toISOString();
 }
 
+function debugSearch(message) {
+  if (process.env.DYCA_DEBUG_SEARCH) console.error(`search-debug: ${message}`);
+}
+
 export function normalizeStructuredVideo(aweme = {}, defaults = {}) {
   const statistics = aweme.statistics || {};
   const video = aweme.video || {};
@@ -47,7 +56,9 @@ export function normalizeStructuredVideo(aweme = {}, defaults = {}) {
     title,
     description: title,
     author_name: author.nickname || defaults.author_name || null,
+    author_id: String(author.uid || author.sec_uid || defaults.author_id || ''),
     publish_time: epochToISO(aweme.create_time || aweme.createTime),
+    red_heart_count: statistics.digg_count ?? null,
     like_count: statistics.digg_count ?? statistics.like_count ?? null,
     favorite_count: statistics.collect_count ?? statistics.favorite_count ?? null,
     comment_count: statistics.comment_count ?? null,
@@ -59,6 +70,185 @@ export function normalizeStructuredVideo(aweme = {}, defaults = {}) {
     download_url: firstUrl(video.download_addr),
     duration_ms: Number(video.duration || aweme.duration || 0) || null,
     metadata_status: 'structured',
+  };
+}
+
+async function openQualifiedVideo(client, item, searchQuery) {
+  const id = String(item.id || parseDouyinVideoId(item.url) || '');
+  if (!id) throw new Error('Qualified item is missing a Douyin video id');
+  const origin = await client.evaluate(`(() => {
+    const root = document.scrollingElement || document.documentElement;
+    const anchor = [...document.querySelectorAll('a[href*="/video/"]')]
+      .find((node) => String(node.href || '').includes('/video/' + ${JSON.stringify(id)}));
+    if (!anchor) return { ok: false, reason: 'qualified_card_not_found', href: location.href };
+    anchor.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'instant' });
+    const before = { href: location.href, scroll_top: root.scrollTop };
+    anchor.removeAttribute('target');
+    anchor.click();
+    return { ok: true, ...before };
+  })()`);
+  if (!origin?.ok) throw new Error(`Douyin qualified-item open failed: ${origin?.reason || 'unknown'}`);
+  const deadline = Date.now() + 30000;
+  while (Date.now() < deadline) {
+    const state = await client.evaluate(`({ href: location.href, ready: location.href.includes(${JSON.stringify(id)}) })`);
+    if (state?.ready) return { ...origin, item_id: id, search_query: searchQuery };
+    await sleep(500);
+  }
+  throw new Error(`Douyin qualified-item detail did not open: ${id}`);
+}
+
+async function backToSearchResults(client, origin) {
+  await client.evaluate('history.back()');
+  const deadline = Date.now() + 30000;
+  let last = null;
+  while (Date.now() < deadline) {
+    last = await client.evaluate(`(() => {
+      const input = [...document.querySelectorAll('input')]
+        .find((node) => /搜索/.test(node.placeholder || node.getAttribute('aria-label') || ''));
+      return { href: location.href, value: input?.value || '' };
+    })()`);
+    let decoded = last?.href || '';
+    try { decoded = decodeURIComponent(decoded); } catch {}
+    if (/\/jingxuan\/search\//.test(new URL(last.href).pathname)
+      && last.value === origin.search_query
+      && decoded.includes(origin.search_query)) {
+      await client.evaluate(`(() => {
+        const root = document.scrollingElement || document.documentElement;
+        root.scrollTop = ${JSON.stringify(Number(origin.scroll_top || 0))};
+      })()`);
+      return last;
+    }
+    await sleep(500);
+  }
+  throw new Error(`Douyin browser back failed; current page: ${last?.href || 'unknown'}`);
+}
+
+export async function processQualifiedItemTransaction(client, item, {
+  searchQuery,
+  onQualified,
+} = {}) {
+  if (typeof onQualified !== 'function') return { processed: false };
+  const origin = await openQualifiedVideo(client, item, searchQuery);
+  const receipt = await onQualified(item, { ...origin, phase: 'detail_open' });
+  await backToSearchResults(client, origin);
+  return { processed: true, receipt };
+}
+
+export function parseLengthPrefixedJsonStream(input = '') {
+  const text = String(input || '');
+  if (!text.trim()) return [];
+  try {
+    return [JSON.parse(text)];
+  } catch {}
+
+  const buffer = Buffer.from(text, 'utf8');
+  const frames = [];
+  let offset = 0;
+  while (offset < buffer.length) {
+    while (offset < buffer.length && /\s/.test(String.fromCharCode(buffer[offset]))) offset += 1;
+    if (offset >= buffer.length) break;
+    const crlf = buffer.indexOf('\r\n', offset, 'utf8');
+    const lf = buffer.indexOf('\n', offset, 'utf8');
+    const lineEnd = crlf >= 0 ? crlf : lf;
+    const delimiterBytes = crlf >= 0 ? 2 : 1;
+    if (lineEnd < 0) break;
+    const sizeToken = buffer.subarray(offset, lineEnd).toString('ascii').trim().split(';')[0];
+    const byteLength = Number.parseInt(sizeToken, 16);
+    if (!Number.isInteger(byteLength) || byteLength <= 0) break;
+    const bodyStart = lineEnd + delimiterBytes;
+    const bodyEnd = bodyStart + byteLength;
+    if (bodyEnd > buffer.length) break;
+    try {
+      frames.push(JSON.parse(buffer.subarray(bodyStart, bodyEnd).toString('utf8')));
+    } catch {
+      break;
+    }
+    offset = bodyEnd;
+  }
+  return frames;
+}
+
+export function extractSearchVideos(payload = {}) {
+  const awemes = [];
+  const seenObjects = new Set();
+  const visit = (value) => {
+    if (!value || typeof value !== 'object' || seenObjects.has(value)) return;
+    seenObjects.add(value);
+    if ((value.aweme_id || value.awemeId) && value.statistics) {
+      awemes.push(normalizeStructuredVideo(value));
+      return;
+    }
+    if (Array.isArray(value)) {
+      for (const child of value) visit(child);
+      return;
+    }
+    for (const child of Object.values(value)) visit(child);
+  };
+  visit(payload);
+  return uniqByVideoId(awemes);
+}
+
+export function parseSearchStreamBody(input = '') {
+  return uniqByVideoId(parseLengthPrefixedJsonStream(input).flatMap((frame) => extractSearchVideos(frame)));
+}
+
+function numericMetric(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const parsed = Number(String(value).replace(/,/g, '').trim());
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
+}
+
+export function applyKeywordSearchStandard(items = [], {
+  keyword = '',
+  minRedHearts = 1000,
+  withinDays = 7,
+  target = 10,
+  maxScanned = 200,
+  capturedAt = new Date().toISOString(),
+} = {}) {
+  const capturedAtMs = Date.parse(capturedAt);
+  if (!Number.isFinite(capturedAtMs)) throw new Error('capturedAt must be a valid timestamp');
+  const cutoffMs = capturedAtMs - (Number(withinDays) * 24 * 60 * 60 * 1000);
+  const unique = uniqByVideoId(items);
+  const scannedItems = [];
+  const qualified = [];
+  const counters = {
+    missing_red_heart_count: 0,
+    red_heart_at_or_below_count: 0,
+    missing_publish_time_count: 0,
+    outside_time_window_count: 0,
+  };
+  for (const item of unique) {
+    if (scannedItems.length >= maxScanned || qualified.length >= target) break;
+    const redHeartCount = numericMetric(item.red_heart_count);
+    const publishTimeMs = Date.parse(item.publish_time || '');
+    const hasPublishTime = Number.isFinite(publishTimeMs);
+    const withinWindow = hasPublishTime && publishTimeMs >= cutoffMs && publishTimeMs <= capturedAtMs + (5 * 60 * 1000);
+    if (redHeartCount === null) counters.missing_red_heart_count += 1;
+    else if (redHeartCount <= minRedHearts) counters.red_heart_at_or_below_count += 1;
+    if (!hasPublishTime) counters.missing_publish_time_count += 1;
+    else if (!withinWindow) counters.outside_time_window_count += 1;
+    const normalized = { ...item, keyword, red_heart_count: redHeartCount };
+    scannedItems.push(normalized);
+    if (redHeartCount !== null && redHeartCount > minRedHearts && withinWindow) qualified.push(normalized);
+  }
+  return {
+    scanned_items: scannedItems,
+    qualified_items: qualified,
+    standard: {
+      red_heart_field: 'statistics.digg_count',
+      red_heart_operator: '>',
+      min_red_hearts: minRedHearts,
+      time_field: 'create_time',
+      within_days: withinDays,
+      captured_at: new Date(capturedAtMs).toISOString(),
+      cutoff_at: new Date(cutoffMs).toISOString(),
+      target_per_keyword: target,
+      max_scanned_per_keyword: maxScanned,
+      scanned_count: scannedItems.length,
+      qualified_count: qualified.length,
+      ...counters,
+    },
   };
 }
 
@@ -171,6 +361,368 @@ async function collectVisibleVideoLinks(client) {
       return out;
     })()
   `);
+}
+
+async function waitForSearchInput(client, { timeoutMs = 60000 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  let last = null;
+  while (Date.now() < deadline) {
+    last = await client.evaluate(`(() => {
+      const text = String(document.body?.innerText || '').replace(/\\s+/g, ' ').trim();
+      return {
+      found: Boolean([...document.querySelectorAll('input')].find((node) => /搜索/.test(node.placeholder || node.getAttribute('aria-label') || ''))),
+      ready: document.readyState === 'complete',
+      page_age_ms: Math.round(performance.now()),
+      href: location.href,
+      risk_control: /验证码|安全验证|验证一下|访问太频繁|请稍后再试|环境异常|操作过于频繁/.test(text),
+      login_required: /扫码登录|密码登录|手机号登录|请先登录/.test(text),
+      };
+    })()`);
+    if (last?.risk_control) throw new Error('Douyin requires verification. Complete it in the dedicated Chrome window and retry.');
+    if (last?.login_required) throw new Error('Douyin requires login. Run `dyca login` and retry.');
+    if (last?.found && last?.ready && last.page_age_ms >= 2500) return;
+    await sleep(500);
+  }
+  throw new Error(`Douyin search input was not found before timeout: ${last?.href || 'unknown URL'}`);
+}
+
+async function submitSearchKeyword(client, keyword) {
+  const searchQuery = keyword.startsWith('#') ? keyword : `#${keyword}`;
+  await waitForSearchInput(client);
+  const previousHref = await client.evaluate('location.href');
+  debugSearch(`input ready for ${searchQuery}`);
+  await client.send('Page.bringToFront');
+  const inputPoint = await client.evaluate(`
+    (() => {
+      const input = [...document.querySelectorAll('input')]
+        .find((node) => /搜索/.test(node.placeholder || node.getAttribute('aria-label') || ''));
+      if (!input) return null;
+      const rect = input.getBoundingClientRect();
+      return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+    })()
+  `);
+  if (!inputPoint) throw new Error('Douyin search UI failed: search_input_not_found');
+  await client.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: inputPoint.x, y: inputPoint.y, button: 'left', clickCount: 1 });
+  await client.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: inputPoint.x, y: inputPoint.y, button: 'left', clickCount: 1 });
+  const focused = await client.evaluate(`
+    (() => {
+      const input = [...document.querySelectorAll('input')]
+        .find((node) => /搜索/.test(node.placeholder || node.getAttribute('aria-label') || ''));
+      input?.focus();
+      return Boolean(input && document.activeElement === input);
+    })()
+  `);
+  if (!focused) throw new Error('Douyin search UI failed: search_input_focus_failed');
+  let cleared = false;
+  for (let clearAttempt = 0; clearAttempt < 2 && !cleared; clearAttempt += 1) {
+    await client.evaluate(`
+      (() => {
+        const input = [...document.querySelectorAll('input')]
+          .find((node) => /搜索/.test(node.placeholder || node.getAttribute('aria-label') || ''));
+        input?.focus();
+        input?.select();
+        return Boolean(input);
+      })()
+    `);
+    await client.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Backspace', code: 'Backspace', commands: ['deleteBackward'] });
+    await client.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Backspace', code: 'Backspace' });
+    await sleep(200);
+    cleared = await client.evaluate(`
+      (() => {
+        const input = [...document.querySelectorAll('input')]
+          .find((node) => /搜索/.test(node.placeholder || node.getAttribute('aria-label') || ''));
+        return Boolean(input && input.value === '');
+      })()
+    `);
+  }
+  if (!cleared) throw new Error('Douyin search UI failed: previous_keyword_not_cleared');
+  for (const character of searchQuery) {
+    await client.send('Input.insertText', { text: character });
+    await sleep(90);
+  }
+  debugSearch(`typing completed for ${searchQuery}`);
+  const action = await client.evaluate(`
+    (() => {
+      const input = [...document.querySelectorAll('input')]
+        .find((node) => /搜索/.test(node.placeholder || node.getAttribute('aria-label') || ''));
+      const button = [...document.querySelectorAll('button')]
+        .find((node) => String(node.innerText || node.getAttribute('aria-label') || '').trim() === '搜索');
+      if (!input || input.value !== ${JSON.stringify(searchQuery)}) return { ok: false, reason: 'search_input_value_mismatch', value: input?.value || '' };
+      if (!button) return { ok: false, reason: 'search_button_not_found', value: input.value };
+      button.focus();
+      button.click();
+      return { ok: true, value: input.value };
+    })()
+  `);
+  if (!action?.ok) throw new Error(`Douyin search UI failed: ${action?.reason || 'unknown'}${action?.value ? ` (actual: ${action.value})` : ''}`);
+  debugSearch(`search button clicked for ${searchQuery}`);
+
+  const deadline = Date.now() + 45000;
+  let last = null;
+  while (Date.now() < deadline) {
+    last = await client.evaluate(`
+      (() => {
+        const text = String(document.body?.innerText || '').replace(/\\s+/g, ' ').trim();
+        const input = [...document.querySelectorAll('input')]
+          .find((node) => /搜索/.test(node.placeholder || node.getAttribute('aria-label') || ''));
+        let decodedHref = location.href;
+        let decodedPreviousHref = ${JSON.stringify(previousHref)};
+        try { decodedHref = decodeURIComponent(location.href); } catch {}
+        try { decodedPreviousHref = decodeURIComponent(decodedPreviousHref); } catch {}
+        return {
+          href: location.href,
+          value: input?.value || '',
+          ready: /\\/search\\//.test(location.pathname)
+            && input?.value === ${JSON.stringify(searchQuery)}
+            && (location.href !== ${JSON.stringify(previousHref)} || decodedPreviousHref.includes(${JSON.stringify(searchQuery)}))
+            && decodedHref.includes(${JSON.stringify(searchQuery)}),
+          risk_control: /验证码|安全验证|验证一下|访问太频繁|请稍后再试|环境异常|操作过于频繁/.test(text),
+          login_required: /扫码登录|密码登录|手机号登录|请先登录/.test(text),
+        };
+      })()
+    `);
+    if (last?.risk_control) throw new Error('Douyin requires verification. Complete it in the dedicated Chrome window and retry.');
+    if (last?.login_required) throw new Error('Douyin requires login. Run `dyca login` and retry.');
+    if (last?.ready) {
+      debugSearch(`results page ready for ${searchQuery}`);
+      break;
+    }
+    await sleep(750);
+  }
+  if (!last?.ready) throw new Error(`Douyin search results did not load for keyword: ${keyword}`);
+  return last;
+}
+
+async function waitForQueuedSearchResponse(queue, keyword, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (queue.some((item) => item.keyword === keyword)) return true;
+    await sleep(500);
+  }
+  return false;
+}
+
+async function drainSearchResponses(client, queue, keyword) {
+  const selected = [];
+  for (let index = queue.length - 1; index >= 0; index -= 1) {
+    if (queue[index].keyword !== keyword) continue;
+    selected.unshift(queue[index]);
+    queue.splice(index, 1);
+  }
+  const items = [];
+  let parsedResponses = 0;
+  for (const response of selected) {
+    try {
+      const body = await client.send('Network.getResponseBody', { requestId: response.requestId }, { timeoutMs: 10000 });
+      let text = body?.body || '';
+      if (body?.base64Encoded) text = Buffer.from(text, 'base64').toString('utf8');
+      items.push(...parseSearchStreamBody(text));
+      parsedResponses += 1;
+    } catch (error) {
+      if (process.env.DYCA_DEBUG_NETWORK) console.error(`search-stream body error: ${error.message}`);
+    }
+  }
+  return { items: uniqByVideoId(items), parsed_responses: parsedResponses };
+}
+
+async function scrollSearchResults(client) {
+  return client.evaluate(`
+    (() => {
+      const candidates = [...document.querySelectorAll('*')]
+        .filter((node) => {
+          const style = getComputedStyle(node);
+          const rect = node.getBoundingClientRect();
+          return /auto|scroll/.test(style.overflowY)
+            && node.scrollHeight > node.clientHeight + 200
+            && node.clientHeight > 200
+            && rect.width > 300;
+        })
+        .sort((a, b) => b.clientHeight - a.clientHeight);
+      const target = candidates[0];
+      if (!target) return { ok: false, reason: 'scroll_container_not_found' };
+      const before = target.scrollTop;
+      target.scrollTop = Math.min(target.scrollHeight, target.scrollTop + Math.max(target.clientHeight * 2.5, 1600));
+      target.dispatchEvent(new Event('scroll', { bubbles: true }));
+      return { ok: true, before, after: target.scrollTop, scroll_height: target.scrollHeight, client_height: target.clientHeight };
+    })()
+  `);
+}
+
+export async function collectKeywordSearchBatch({
+  keywords = [],
+  targetPerKeyword = 10,
+  maxScannedPerKeyword = 200,
+  minRedHearts = 1000,
+  withinDays = 7,
+  maxScrollRounds = 80,
+  scrollDelayMs = 2500,
+  responseWaitMs = 15000,
+  profileDir = DEFAULT_PROFILE_DIR,
+  chromePath = DEFAULT_CHROME_PATH,
+  port = DEFAULT_CDP_PORT,
+  visible = true,
+  onProgress = null,
+  onCheckpoint = null,
+  onQualified = null,
+} = {}) {
+  const normalizedKeywords = [...new Set(keywords.map((value) => compact(value)).filter(Boolean))];
+  if (!normalizedKeywords.length) throw new Error('At least one keyword is required');
+  const capturedAt = new Date().toISOString();
+  const previousFrontmostApplication = await captureFrontmostApplication();
+  await launchChrome({ chromePath, profileDir, port, url: 'https://www.douyin.com/jingxuan', visible });
+  const client = new CDPClient({ commandTimeoutMs: 30000 });
+  await client.connect(port, {
+    initialUrl: 'https://www.douyin.com/jingxuan',
+    reuseUrlPattern: '^https://www\\.douyin\\.com/jingxuan(?:/search/|$)',
+  });
+  const keepAlive = setInterval(() => {}, 1000);
+  const responseQueue = [];
+  const pendingRequests = new Map();
+  let activeKeyword = null;
+  try {
+    await client.send('Network.enable');
+    client.on('Network.responseReceived', (params) => {
+      const url = String(params.response?.url || '');
+      if (!/\/aweme\/v1\/web\/general\/search\/stream\//i.test(url)) return;
+      pendingRequests.set(params.requestId, activeKeyword);
+    });
+    client.on('Network.loadingFinished', (params) => {
+      const keyword = pendingRequests.get(params.requestId);
+      if (!keyword) return;
+      pendingRequests.delete(params.requestId);
+      responseQueue.push({ requestId: params.requestId, keyword });
+    });
+    client.on('Network.loadingFailed', (params) => pendingRequests.delete(params.requestId));
+    const keywordReports = [];
+    const qualifiedItems = [];
+    const scannedItems = [];
+    for (let keywordIndex = 0; keywordIndex < normalizedKeywords.length; keywordIndex += 1) {
+      const keyword = normalizedKeywords[keywordIndex];
+      activeKeyword = keyword;
+      onProgress?.({ phase: 'keyword_start', keyword, keyword_index: keywordIndex + 1, keyword_total: normalizedKeywords.length });
+      let observed = new Map();
+      const processedQualifiedIds = new Set();
+      let parsedResponses = 0;
+      let roundsCompleted = 0;
+      let searchAttempts = 0;
+      let selection = applyKeywordSearchStandard([], {
+        keyword,
+        minRedHearts,
+        withinDays,
+        target: targetPerKeyword,
+        maxScanned: maxScannedPerKeyword,
+        capturedAt,
+      });
+      let stopReason = 'no_search_response';
+      for (let attempt = 1; attempt <= 2; attempt += 1) {
+        searchAttempts = attempt;
+        if (attempt > 1) {
+          onProgress?.({ phase: 'keyword_retry', keyword, attempt });
+          await sleep(Math.max(1500, Number(scrollDelayMs || 0)));
+        }
+        await submitSearchKeyword(client, keyword);
+        debugSearch(`collector entered scan loop for ${keyword} attempt=${attempt}`);
+        observed = new Map();
+        parsedResponses = 0;
+        let stableRounds = 0;
+        roundsCompleted = 0;
+        for (let round = 0; round < maxScrollRounds; round += 1) {
+          roundsCompleted = round + 1;
+          debugSearch(`waiting response keyword=${keyword} round=${round + 1}`);
+          await waitForQueuedSearchResponse(responseQueue, keyword, round === 0 ? responseWaitMs : Math.min(responseWaitMs, 8000));
+          debugSearch(`draining response keyword=${keyword} round=${round + 1} queued=${responseQueue.length}`);
+          const drained = await drainSearchResponses(client, responseQueue, keyword);
+          parsedResponses += drained.parsed_responses;
+          const before = observed.size;
+          for (const item of drained.items) {
+            if (item.id && !observed.has(item.id)) observed.set(item.id, item);
+          }
+          selection = applyKeywordSearchStandard([...observed.values()], {
+            keyword,
+            minRedHearts,
+            withinDays,
+            target: targetPerKeyword,
+            maxScanned: maxScannedPerKeyword,
+            capturedAt,
+          });
+          onProgress?.({
+            phase: 'keyword_scan',
+            keyword,
+            round: round + 1,
+            scanned: selection.standard.scanned_count,
+            qualified: selection.standard.qualified_count,
+          });
+          for (const qualifiedItem of selection.qualified_items) {
+            const qualifiedId = String(qualifiedItem.id || parseDouyinVideoId(qualifiedItem.url) || '');
+            if (!qualifiedId || processedQualifiedIds.has(qualifiedId)) continue;
+            onProgress?.({ phase: 'qualified_start', keyword, item: qualifiedItem });
+            const transaction = await processQualifiedItemTransaction(client, qualifiedItem, {
+              searchQuery: keyword.startsWith('#') ? keyword : `#${keyword}`,
+              onQualified,
+            });
+            processedQualifiedIds.add(qualifiedId);
+            onProgress?.({ phase: 'qualified_done', keyword, item: qualifiedItem, transaction });
+          }
+          if (round === 0 && parsedResponses === 0 && observed.size === 0) {
+            stopReason = 'no_search_response';
+            break;
+          }
+          if (selection.standard.qualified_count >= targetPerKeyword) {
+            stopReason = 'target_reached';
+            break;
+          }
+          if (selection.standard.scanned_count >= maxScannedPerKeyword) {
+            stopReason = 'scan_limit_reached';
+            break;
+          }
+          stableRounds = observed.size === before ? stableRounds + 1 : 0;
+          if (stableRounds >= 6) {
+            stopReason = 'results_exhausted';
+            break;
+          }
+          const scroll = await scrollSearchResults(client);
+          debugSearch(`scroll keyword=${keyword} ok=${scroll?.ok} before=${scroll?.before ?? 'n/a'} after=${scroll?.after ?? 'n/a'}`);
+          await sleep(Math.max(500, Number(scrollDelayMs || 0)));
+        }
+        if (parsedResponses > 0) break;
+      }
+      if (parsedResponses === 0) throw new Error(`Douyin returned no structured search response after 2 attempts: ${keyword}`);
+      const report = {
+        keyword,
+        search_query: keyword.startsWith('#') ? keyword : `#${keyword}`,
+        keyword_index: keywordIndex + 1,
+        stop_reason: stopReason,
+        rounds_completed: roundsCompleted,
+        search_attempts: searchAttempts,
+        parsed_search_responses: parsedResponses,
+        observed_unique_count: observed.size,
+        ...selection.standard,
+      };
+      keywordReports.push(report);
+      scannedItems.push(...selection.scanned_items);
+      qualifiedItems.push(...selection.qualified_items);
+      onProgress?.({ phase: 'keyword_done', ...report });
+      await onCheckpoint?.({
+        captured_at: capturedAt,
+        keywords: normalizedKeywords,
+        qualified_items: [...qualifiedItems],
+        scanned_items: [...scannedItems],
+        keyword_reports: [...keywordReports],
+      });
+      if (keywordIndex < normalizedKeywords.length - 1) await sleep(Math.max(1000, Number(scrollDelayMs || 0)));
+    }
+    return {
+      captured_at: capturedAt,
+      keywords: normalizedKeywords,
+      qualified_items: qualifiedItems,
+      scanned_items: scannedItems,
+      keyword_reports: keywordReports,
+    };
+  } finally {
+    clearInterval(keepAlive);
+    await client.disconnect().catch(() => {});
+    await restoreFrontmostApplication(previousFrontmostApplication);
+  }
 }
 
 export async function collectCreatorSnapshot({

@@ -1,6 +1,6 @@
 # Douyin Creator Archiver
 
-Mac-first source-code toolkit for archiving public Douyin creator metadata, covers, media, and voice transcripts.
+Mac-first source-code toolkit for searching public Douyin videos and archiving creator metadata, media, and voice transcripts.
 
 It provides:
 
@@ -8,8 +8,9 @@ It provides:
 - A dedicated Chrome profile for Douyin login.
 - Serial, stable browser automation through Chrome DevTools Protocol.
 - Creator-page video discovery.
-- Per-video structured metadata: title, publish time, likes, favorites, comments, shares, cover URL, and duration.
-- A default qualification standard of `like_count >= 1000`; missing like counts are excluded rather than treated as zero.
+- Keyword search through the visible Douyin search box and search button, never by guessing a search URL.
+- Per-video structured metadata including `statistics.digg_count` as `red_heart_count`.
+- Keyword rules: `red_heart_count > 1000`, publication within 7 days, 10 qualified rows per keyword, or switch after scanning 200 rows.
 - Known video URL archiving for upstream ingest queues.
 - Cover download, video download, and optional audio extraction.
 - Optional local Whisper voice transcription.
@@ -64,10 +65,36 @@ dyca archive \
   --creator-url "https://www.douyin.com/user/..." \
   --out ./douyin-archive \
   --limit 50 \
-  --min-likes 1000 \
+  --min-red-hearts 1000 \
   --mode both \
   --transcribe true \
   --whisper-model /absolute/path/to/ggml-small-q5_1.bin
+```
+
+## Search the Included Business Keywords
+
+```bash
+dyca search-keywords \
+  --keywords-file ./presets/business-keywords.txt \
+  --out ./douyin-keyword-search \
+  --target-per-keyword 10 \
+  --max-scanned-per-keyword 200 \
+  --min-red-hearts 1000 \
+  --within-days 7
+```
+
+The browser types `#` before each keyword, clicks the visible search button, and processes keywords serially in one reused Douyin window. Before the next keyword it selects and deletes the old query, verifies that the input is empty, and then types the new query. A video qualifies only when the structured `statistics.digg_count` is strictly greater than 1000 and `create_time` falls inside the rolling 7-day window. Exact 1000, missing metrics, and missing publication times are excluded. The tool keeps the Douyin window open to preserve the session and restores the application that was in front before the run.
+
+For item-at-a-time ingestion, pass `--qualified-hook /absolute/path/to/hook.mjs`. Each newly qualified video is opened in the same tab, written to `transactions/<video_id>/qualified-item.json`, and passed to the hook as `--item-json ... --transaction-dir ...`. Only a zero-exit hook is treated as a confirmed ingest. The browser then calls Back, verifies the original `#keyword` results page and restores its scroll position before scanning continues. Hook failure or Back verification failure stops the run; the current keyword is never re-searched after an ingest.
+
+Outputs:
+
+```text
+douyin-keyword-search/
+  qualified-content.json
+  qualified-content.jsonl
+  keyword-report.json
+  logs/scanned-content.jsonl
 ```
 
 ## Archive Known Video URLs
@@ -117,9 +144,10 @@ douyin-archive/
 ```bash
 dyca doctor
 dyca login [--profile-dir PATH] [--port 9533]
-dyca list --creator-url URL [--out DIR] [--limit N] [--min-likes N] [--scroll-rounds N]
-dyca archive --creator-url URL [--out DIR] [--limit N] [--min-likes N] [--mode audio|video|both]
-dyca archive-urls --input ROWS.jsonl [--out DIR] [--limit N] [--min-likes N] [--mode audio|video|both]
+dyca search-keywords --keywords-file FILE [--out DIR] [--target-per-keyword 10] [--max-scanned-per-keyword 200] [--min-red-hearts 1000] [--within-days 7] [--qualified-hook SCRIPT]
+dyca list --creator-url URL [--out DIR] [--limit N] [--min-red-hearts N] [--scroll-rounds N]
+dyca archive --creator-url URL [--out DIR] [--limit N] [--min-red-hearts N] [--mode audio|video|both]
+dyca archive-urls --input ROWS.jsonl [--out DIR] [--limit N] [--min-red-hearts N] [--mode audio|video|both]
 ```
 
 Important options:
@@ -128,9 +156,9 @@ Important options:
 - `--chrome-path`: Chrome executable path. Defaults to `/Applications/Google Chrome.app/Contents/MacOS/Google Chrome`.
 - `--port`: CDP port. Defaults to `9533`.
 - `--delay-ms`: delay between videos. Defaults to `2500`.
-- `--min-likes`: minimum red-heart/like count. Defaults to `1000` and is inclusive. Missing values are excluded.
+- `--min-red-hearts`: `statistics.digg_count` threshold. Defaults to `1000` and is strict (`>`). Missing values are excluded.
 - `--visible false`: run Chrome without `--new-window` visibility hints. Login still requires visible Chrome.
-- `--covers false`: skip cover downloads. Covers are downloaded by default.
+- `--covers true`: explicitly opt in to cover downloads. Covers are skipped by default.
 - `--transcribe true`: generate voice transcripts with local `whisper-cli`.
 - `--whisper-model PATH`: absolute path to a whisper.cpp model. Can also use `DYCA_WHISPER_MODEL`.
 - `--yt-dlp-path PATH`: optional explicit `yt-dlp` binary path for reliable audio-only extraction. Can also use `DYCA_YT_DLP`.
@@ -143,7 +171,7 @@ Each `creator-videos.jsonl` row can include:
   "id": "7597073908935789850",
   "title": "...",
   "publish_time": "...",
-  "like_count": 641,
+  "red_heart_count": 1641,
   "favorite_count": 76,
   "comment_count": 11,
   "share_count": 122,
@@ -159,7 +187,7 @@ Each `creator-videos.jsonl` row can include:
 
 `logs/list-report.json` records how creator discovery stopped. The collector watches the creator page's own `aweme/post` responses while scrolling and records `cursor` plus `has_more`. It sets `complete: true` only when pagination was observed, `has_more=false`, and the requested `--limit` did not stop the run first. Otherwise `observed_count` remains non-authoritative.
 
-The final `creator-videos.jsonl` contains only videos meeting `like_count >= --min-likes`. `logs/list-report.json.like_standard` records observed, qualified, below-threshold, and missing-metric counts. Account completeness and threshold qualification are separate: a threshold result is authoritative for the full account only when `complete=true`.
+The final `creator-videos.jsonl` contains only videos meeting `red_heart_count > --min-red-hearts`. `logs/list-report.json.red_heart_standard` records observed, qualified, at-or-below-threshold, and missing-metric counts. Account completeness and threshold qualification are separate: a threshold result is authoritative for the full account only when `complete=true`.
 
 Voice transcripts cover spoken audio only. Text visible in silent frames, slides, or burned-in subtitles requires a separate OCR pass.
 
