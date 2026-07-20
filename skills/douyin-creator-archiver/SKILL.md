@@ -1,6 +1,6 @@
 ---
 name: douyin-creator-archiver
-description: Use when a Mac user asks an AI agent to archive or download public Douyin videos or audio from a creator profile using a local Chrome login profile. Provides a safe serial CLI workflow with doctor, login, list, and archive commands.
+description: Use when a Mac user asks an AI agent to archive public Douyin creator metadata, covers, videos, audio, or voice transcripts from a creator profile or known video URL queue using a local Chrome login profile.
 ---
 
 # Douyin Creator Archiver Skill
@@ -48,20 +48,30 @@ Ask the user to finish login or verification in the opened Chrome window.
 dyca list --creator-url "<creator profile URL>" --out ./douyin-archive --limit 50
 ```
 
-4. Archive videos or audio:
+4. Archive metadata, covers, media, and optional voice transcripts from a creator:
 
 ```bash
-dyca archive --creator-url "<creator profile URL>" --out ./douyin-archive --limit 50 --mode audio
+dyca archive --creator-url "<creator profile URL>" --out ./douyin-archive --limit 50 --mode audio --transcribe true --whisper-model /absolute/model.bin
 ```
 
 Use `--mode both` when the user explicitly wants video files and audio files.
 
-5. Report:
+5. If an upstream ingest queue already has exact video URLs, archive those rows directly:
+
+```bash
+dyca archive-urls --input "<pending-ingest-items.jsonl>" --out ./douyin-archive-urls --limit 20 --mode audio
+```
+
+Default JSONL fields are `source_url` and `title`. Use `--url-field` or `--title-field` only when the upstream rows use different keys.
+
+6. Report:
 
 - `creator-videos.json` count.
+- `logs/list-report.json` completeness boundary and stop reason.
 - `logs/archive-report.json` succeeded/failed counts.
 - Failed item titles and errors.
 - Output folder path.
+- Never report `observed_count` as the creator's authoritative total while `complete` is false.
 
 ## Defaults
 
@@ -77,4 +87,3 @@ Use `--mode both` when the user explicitly wants video files and audio files.
 - `Douyin requires verification`: finish verification in the dedicated Chrome window.
 - `No playable media URL captured`: the video may be unavailable, hidden, region-limited, or not fully loaded.
 - Large media timeout: rerun the same command; downloads resume from `.partial` files.
-

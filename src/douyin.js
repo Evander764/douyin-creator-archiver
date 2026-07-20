@@ -17,6 +17,73 @@ function compact(value = '') {
   return String(value || '').replace(/\s+/g, ' ').trim();
 }
 
+function firstUrl(...groups) {
+  for (const group of groups) {
+    if (Array.isArray(group?.url_list) && group.url_list[0]) return group.url_list[0];
+    if (typeof group === 'string' && group) return group;
+  }
+  return null;
+}
+
+function epochToISO(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number <= 0) return null;
+  const date = new Date(number > 1e12 ? number : number * 1000);
+  return Number.isNaN(date.getTime()) ? null : date.toISOString();
+}
+
+export function normalizeStructuredVideo(aweme = {}, defaults = {}) {
+  const statistics = aweme.statistics || {};
+  const video = aweme.video || {};
+  const author = aweme.author || {};
+  const id = String(aweme.aweme_id || aweme.awemeId || parseDouyinVideoId(defaults.url) || '');
+  const title = compact(aweme.desc || aweme.item_title || defaults.title);
+  return {
+    ...defaults,
+    id,
+    url: id ? normalizeVideoUrl(`https://www.douyin.com/video/${id}`) : defaults.url,
+    title,
+    description: title,
+    author_name: author.nickname || defaults.author_name || null,
+    publish_time: epochToISO(aweme.create_time || aweme.createTime),
+    like_count: statistics.digg_count ?? statistics.like_count ?? null,
+    favorite_count: statistics.collect_count ?? statistics.favorite_count ?? null,
+    comment_count: statistics.comment_count ?? null,
+    share_count: statistics.share_count ?? null,
+    cover_url: firstUrl(video.origin_cover, video.raw_cover, video.cover, video.dynamic_cover),
+    download_url: firstUrl(video.download_addr),
+    duration_ms: Number(video.duration || aweme.duration || 0) || null,
+    metadata_status: 'structured',
+  };
+}
+
+export async function fetchStructuredVideoDetail(client, videoUrl, defaults = {}) {
+  const id = parseDouyinVideoId(videoUrl);
+  if (!id) return { ok: false, error: 'missing_video_id', item: null };
+  try {
+    const response = await client.evaluate(`
+      (async () => {
+        const endpoint = new URL('/aweme/v1/web/aweme/detail/', location.origin);
+        endpoint.searchParams.set('aweme_id', ${JSON.stringify(id)});
+        const res = await fetch(endpoint.href, {
+          credentials: 'include',
+          headers: { 'Accept': 'application/json, text/plain, */*' },
+        });
+        const text = await res.text();
+        let data = null;
+        try { data = JSON.parse(text); } catch {}
+        return { ok: res.ok, status: res.status, data };
+      })()
+    `);
+    if (!response?.ok) return { ok: false, error: `http_${response?.status || 'unknown'}`, item: null };
+    const aweme = response.data?.aweme_detail || response.data?.aweme || null;
+    if (!aweme) return { ok: false, error: 'missing_aweme_detail', item: null };
+    return { ok: true, error: null, item: normalizeStructuredVideo(aweme, { ...defaults, url: normalizeVideoUrl(videoUrl) }) };
+  } catch (error) {
+    return { ok: false, error: error.message || 'structured_fetch_failed', item: null };
+  }
+}
+
 function uniqByVideoId(items = []) {
   const seen = new Set();
   const out = [];
@@ -67,7 +134,7 @@ async function collectVisibleVideoLinks(client) {
   `);
 }
 
-export async function collectCreatorVideos({
+export async function collectCreatorSnapshot({
   creatorUrl,
   limit = 100,
   scrollRounds = 80,
@@ -75,6 +142,7 @@ export async function collectCreatorVideos({
   chromePath = DEFAULT_CHROME_PATH,
   port = DEFAULT_CDP_PORT,
   visible = true,
+  metadataDelayMs = 300,
   onProgress = null,
 } = {}) {
   if (!creatorUrl) throw new Error('Missing --creator-url');
@@ -86,21 +154,51 @@ export async function collectCreatorVideos({
     await waitForUsableDouyinPage(client);
     let videos = [];
     let stableRounds = 0;
+    let roundsCompleted = 0;
+    let stopReason = 'scroll_rounds_exhausted';
     for (let round = 0; round < Number(scrollRounds || 80); round += 1) {
+      roundsCompleted = round + 1;
       const before = videos.length;
       videos = uniqByVideoId([...videos, ...(await collectVisibleVideoLinks(client))]).slice(0, limit);
       onProgress?.({ phase: 'list', round: round + 1, found: videos.length });
-      if (videos.length >= limit) break;
+      if (videos.length >= limit) {
+        stopReason = 'limit_reached';
+        break;
+      }
       await client.evaluate('window.scrollBy(0, Math.max(900, window.innerHeight * 0.85))');
       await sleep(1800);
       if (videos.length === before) stableRounds += 1;
       else stableRounds = 0;
-      if (stableRounds >= 6) break;
+      if (stableRounds >= 6) {
+        stopReason = 'dom_stable';
+        break;
+      }
     }
-    return videos;
+    const enriched = [];
+    for (let index = 0; index < videos.length; index += 1) {
+      const video = videos[index];
+      const detail = await fetchStructuredVideoDetail(client, video.url, video);
+      enriched.push(detail.ok ? detail.item : { ...video, metadata_status: 'failed', metadata_error: detail.error });
+      onProgress?.({ phase: 'metadata', index: index + 1, total: videos.length, ok: detail.ok });
+      if (index < videos.length - 1) await sleep(Math.max(0, Number(metadataDelayMs || 0)));
+    }
+    return {
+      videos: enriched,
+      listing: {
+        observed_count: enriched.length,
+        rounds_completed: roundsCompleted,
+        stop_reason: stopReason,
+        complete: false,
+        completeness_note: 'DOM scrolling cannot prove creator-page exhaustion; treat this as observed_count, not an authoritative total.',
+      },
+    };
   } finally {
     await client.close().catch(() => {});
   }
+}
+
+export async function collectCreatorVideos(options = {}) {
+  return (await collectCreatorSnapshot(options)).videos;
 }
 
 function isMediaUrl({ url = '', mimeType = '', resourceType = '' } = {}) {
@@ -199,4 +297,3 @@ export async function resolveVideoMedia({
     await client.close().catch(() => {});
   }
 }
-

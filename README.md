@@ -1,6 +1,6 @@
 # Douyin Creator Archiver
 
-Mac-first toolkit for AI agents that need to archive public Douyin videos from one creator profile.
+Mac-first source-code toolkit for archiving public Douyin creator metadata, covers, media, and voice transcripts.
 
 It provides:
 
@@ -8,7 +8,10 @@ It provides:
 - A dedicated Chrome profile for Douyin login.
 - Serial, stable browser automation through Chrome DevTools Protocol.
 - Creator-page video discovery.
-- Video download plus optional audio extraction.
+- Per-video structured metadata: title, publish time, likes, favorites, comments, shares, cover URL, and duration.
+- Known video URL archiving for upstream ingest queues.
+- Cover download, video download, and optional audio extraction.
+- Optional local Whisper voice transcription.
 - A Codex-compatible skill under `skills/douyin-creator-archiver/`.
 
 ## Responsible Use
@@ -59,8 +62,24 @@ dyca archive \
   --creator-url "https://www.douyin.com/user/..." \
   --out ./douyin-archive \
   --limit 50 \
-  --mode both
+  --mode both \
+  --transcribe true \
+  --whisper-model /absolute/path/to/ggml-small-q5_1.bin
 ```
+
+## Archive Known Video URLs
+
+When another ingest tool has already found exact Douyin video URLs, skip creator-page discovery and archive those rows directly:
+
+```bash
+dyca archive-urls \
+  --input ./pending-ingest-items.jsonl \
+  --out ./douyin-archive-urls \
+  --limit 20 \
+  --mode audio
+```
+
+The input is JSONL and defaults to `source_url` for the URL and `title` for the title. Use `--url-field` or `--title-field` if your rows use different keys.
 
 Modes:
 
@@ -76,6 +95,8 @@ douyin-archive/
   creator-videos.jsonl
   videos/
   audio/
+  covers/
+  transcripts/
   logs/
 ```
 
@@ -85,7 +106,8 @@ douyin-archive/
 2. Run `dyca login` if the profile is not logged into Douyin.
 3. Run `dyca list --creator-url ... --limit ...` to inspect discovered videos.
 4. Run `dyca archive --creator-url ... --mode audio|video|both`.
-5. Summarize `creator-videos.json` and report failed items from `logs/archive-report.json`.
+5. For an upstream queue, run `dyca archive-urls --input pending-ingest-items.jsonl --mode audio`.
+6. Summarize `creator-videos.json` and report failed items from `logs/archive-report.json`.
 
 ## CLI Reference
 
@@ -94,6 +116,7 @@ dyca doctor
 dyca login [--profile-dir PATH] [--port 9533]
 dyca list --creator-url URL [--out DIR] [--limit N] [--scroll-rounds N]
 dyca archive --creator-url URL [--out DIR] [--limit N] [--mode audio|video|both]
+dyca archive-urls --input ROWS.jsonl [--out DIR] [--limit N] [--mode audio|video|both]
 ```
 
 Important options:
@@ -103,6 +126,32 @@ Important options:
 - `--port`: CDP port. Defaults to `9533`.
 - `--delay-ms`: delay between videos. Defaults to `2500`.
 - `--visible false`: run Chrome without `--new-window` visibility hints. Login still requires visible Chrome.
+- `--covers false`: skip cover downloads. Covers are downloaded by default.
+- `--transcribe true`: generate voice transcripts with local `whisper-cli`.
+- `--whisper-model PATH`: absolute path to a whisper.cpp model. Can also use `DYCA_WHISPER_MODEL`.
+
+Each `creator-videos.jsonl` row can include:
+
+```json
+{
+  "id": "7597073908935789850",
+  "title": "...",
+  "publish_time": "...",
+  "like_count": 641,
+  "favorite_count": 76,
+  "comment_count": 11,
+  "share_count": 122,
+  "cover_url": "...",
+  "download_url": "...",
+  "metadata_status": "structured"
+}
+```
+
+## Completeness Boundary
+
+`logs/list-report.json` always records how creator discovery stopped. The current creator-page discovery uses serial DOM scrolling and therefore sets `complete: false`; `observed_count` is not an authoritative creator total. The tool does not claim a full account archive unless a future cursor/`has_more` implementation and count reconciliation prove exhaustion.
+
+Voice transcripts cover spoken audio only. Text visible in silent frames, slides, or burned-in subtitles requires a separate OCR pass.
 
 ## Known Limits
 
@@ -111,6 +160,7 @@ Important options:
 - Some media URLs expire quickly.
 - Large videos may take several minutes; downloads use resume and retries.
 - The default workflow is serial for stability, not speed.
+- Metrics are a capture-time snapshot and can change later.
 
 ## Codex Skill
 

@@ -1,4 +1,4 @@
-import { execFile } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { DEFAULT_CDP_PORT, DEFAULT_CHROME_PATH, sleep } from './utils.js';
 
 const DEFAULT_WINDOW_BOUNDS = { left: 80, top: 80, width: 1280, height: 900 };
@@ -36,8 +36,14 @@ export async function launchChrome({
     );
   }
   args.push(url);
-  const child = execFile(chromePath, args, { detached: false });
+  // Chrome is a reusable local browser service. Ignore its stdio and unref the
+  // child so successful CLI commands can exit instead of waiting on Chrome.
+  const child = spawn(chromePath, args, { detached: false, stdio: 'ignore' });
+  let launchError = null;
+  child.on('error', (error) => { launchError = error; });
+  child.unref();
   for (let i = 0; i < 60; i += 1) {
+    if (launchError) throw new Error(`Chrome launch failed: ${launchError.message}`);
     if (await cdpReady(port)) return { port, child, closeOnDone: true };
     await sleep(250);
   }
@@ -206,4 +212,3 @@ export class CDPClient {
     return closeChromeTarget(this.port, this.targetId);
   }
 }
-
