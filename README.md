@@ -10,7 +10,7 @@ It provides:
 - Creator-page video discovery.
 - Keyword search through the visible Douyin search box and search button, never by guessing a search URL.
 - Per-video structured metadata including `statistics.digg_count` as `red_heart_count`.
-- Keyword rules: `red_heart_count > 1000`, publication within 14 days, 3 qualified rows per keyword, or switch after scanning 200 rows.
+- Keyword rules: `red_heart_count > 1000`, publication within 14 days, 1 qualified row per keyword, or switch after scanning 200 rows.
 - Known video URL archiving for upstream ingest queues.
 - Cover download, video download, and optional audio extraction.
 - Optional local Whisper voice transcription.
@@ -77,7 +77,7 @@ dyca archive \
 dyca search-keywords \
   --keywords-file ./presets/business-keywords.txt \
   --out ./douyin-keyword-search \
-  --target-per-keyword 3 \
+  --target-per-keyword 1 \
   --max-scanned-per-keyword 200 \
   --min-red-hearts 1000 \
   --within-days 14
@@ -144,7 +144,7 @@ douyin-archive/
 ```bash
 dyca doctor
 dyca login [--profile-dir PATH] [--port 9533]
-dyca search-keywords --keywords-file FILE [--out DIR] [--target-per-keyword 3] [--max-scanned-per-keyword 200] [--min-red-hearts 1000] [--within-days 14] [--qualified-hook SCRIPT]
+dyca search-keywords --keywords-file FILE [--out DIR] [--target-per-keyword 1] [--max-scanned-per-keyword 200] [--min-red-hearts 1000] [--within-days 14] [--qualified-hook SCRIPT]
 dyca list --creator-url URL [--out DIR] [--limit N] [--min-red-hearts N] [--scroll-rounds N]
 dyca archive --creator-url URL [--out DIR] [--limit N] [--min-red-hearts N] [--mode audio|video|both]
 dyca archive-urls --input ROWS.jsonl [--out DIR] [--limit N] [--min-red-hearts N] [--mode audio|video|both]

@@ -32,7 +32,7 @@ function usage() {
 Usage:
   dyca doctor
   dyca login [--profile-dir PATH] [--port 9533]
-  dyca search-keywords --keywords-file FILE [--out DIR] [--target-per-keyword 3] [--max-scanned-per-keyword 200] [--min-red-hearts 1000] [--within-days 14] [--qualified-hook SCRIPT]
+  dyca search-keywords --keywords-file FILE [--out DIR] [--target-per-keyword 1] [--max-scanned-per-keyword 200] [--min-red-hearts 1000] [--within-days 14] [--qualified-hook SCRIPT]
   dyca list --creator-url URL [--out DIR] [--limit N] [--min-red-hearts 1000]
   dyca archive --creator-url URL [--out DIR] [--limit N] [--min-red-hearts 1000] [--mode audio|video|both] [--transcribe true --whisper-model PATH]
   dyca archive-urls --input ROWS.jsonl [--out DIR] [--limit N] [--min-red-hearts 1000] [--mode audio|video|both] [--transcribe true --whisper-model PATH]
@@ -504,7 +504,7 @@ async function commandSearchKeywords(args) {
     : null;
   const result = await collectKeywordSearchBatch({
     keywords,
-    targetPerKeyword: positiveInteger(args['target-per-keyword'], 3, '--target-per-keyword', 100),
+    targetPerKeyword: positiveInteger(args['target-per-keyword'], 1, '--target-per-keyword', 100),
     maxScannedPerKeyword: positiveInteger(args['max-scanned-per-keyword'], 200, '--max-scanned-per-keyword', 5000),
     minRedHearts: minimumRedHearts(args),
     withinDays: positiveInteger(args['within-days'], 14, '--within-days', 3650),

@@ -155,7 +155,7 @@ test('keyword search standard requires >1000 red hearts and publication within 1
   assert.equal(result.standard.missing_publish_time_count, 1);
 });
 
-test('keyword search standard stops at 3 qualified items or 200 scanned items', () => {
+test('keyword search standard stops at 1 qualified item or 200 scanned items', () => {
   const capturedAt = '2026-07-20T12:00:00.000Z';
   const eligible = Array.from({ length: 20 }, (_, index) => ({
     id: String(7611095597914918200n + BigInt(index)),
@@ -163,16 +163,16 @@ test('keyword search standard stops at 3 qualified items or 200 scanned items', 
     red_heart_count: 1001,
     publish_time: '2026-07-20T00:00:00.000Z',
   }));
-  const targetStopped = applyKeywordSearchStandard(eligible, { capturedAt, target: 3, maxScanned: 200 });
-  assert.equal(targetStopped.standard.scanned_count, 3);
-  assert.equal(targetStopped.standard.qualified_count, 3);
+  const targetStopped = applyKeywordSearchStandard(eligible, { capturedAt, target: 1, maxScanned: 200 });
+  assert.equal(targetStopped.standard.scanned_count, 1);
+  assert.equal(targetStopped.standard.qualified_count, 1);
   const ineligible = Array.from({ length: 250 }, (_, index) => ({
     id: String(7611095597914920000n + BigInt(index)),
     url: `https://www.douyin.com/video/${7611095597914920000n + BigInt(index)}`,
     red_heart_count: 1000,
     publish_time: '2026-07-20T00:00:00.000Z',
   }));
-  const limitStopped = applyKeywordSearchStandard(ineligible, { capturedAt, target: 3, maxScanned: 200 });
+  const limitStopped = applyKeywordSearchStandard(ineligible, { capturedAt, target: 1, maxScanned: 200 });
   assert.equal(limitStopped.standard.scanned_count, 200);
   assert.equal(limitStopped.standard.qualified_count, 0);
 });

@@ -45,10 +45,10 @@ Ask the user to finish login or verification in the opened Chrome window.
 3. For keyword search, use the visible search-box workflow:
 
 ```bash
-dyca search-keywords --keywords-file ./presets/business-keywords.txt --out ./douyin-keyword-search --target-per-keyword 3 --max-scanned-per-keyword 200 --min-red-hearts 1000 --within-days 14
+dyca search-keywords --keywords-file ./presets/business-keywords.txt --out ./douyin-keyword-search --target-per-keyword 1 --max-scanned-per-keyword 200 --min-red-hearts 1000 --within-days 14
 ```
 
-The command must reuse one Douyin window, select and delete the previous query, verify the box is empty, type `#keyword`, and click the visible search button. It must not construct a search-result URL. Qualify only `statistics.digg_count > 1000` plus publication inside the rolling 14-day window. Switch at 3 qualified rows or 200 scanned rows. Keep the Douyin page open to preserve the session, disconnect control on exit, and restore the previously frontmost application.
+The command must reuse one Douyin window, select and delete the previous query, verify the box is empty, type `#keyword`, and click the visible search button. It must not construct a search-result URL. Qualify only `statistics.digg_count > 1000` plus publication inside the rolling 14-day window. Switch after the first qualified row or 200 scanned rows. Keep the Douyin page open to preserve the session, disconnect control on exit, and restore the previously frontmost application.
 
 When the workflow requires immediate ingestion, pass `--qualified-hook <absolute-script.mjs>`. The hook must finish and verify one item before the browser goes Back to the same search result and continues. Stop on hook or Back failure. Never submit the current keyword again after an item has been ingested.
 
