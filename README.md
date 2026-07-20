@@ -1,6 +1,6 @@
 # Douyin Creator Archiver
 
-Mac-first toolkit for AI agents that need to archive public Douyin videos from one creator profile.
+Mac-first source-code toolkit for searching public Douyin videos and archiving creator metadata, media, and voice transcripts.
 
 It provides:
 
@@ -8,7 +8,12 @@ It provides:
 - A dedicated Chrome profile for Douyin login.
 - Serial, stable browser automation through Chrome DevTools Protocol.
 - Creator-page video discovery.
-- Video download plus optional audio extraction.
+- Keyword search through the visible Douyin search box and search button, never by guessing a search URL.
+- Per-video structured metadata including `statistics.digg_count` as `red_heart_count`.
+- Keyword rules: `red_heart_count > 1000`, publication within 120 days, 1 qualified row per keyword, or switch after scanning 200 rows.
+- Known video URL archiving for upstream ingest queues.
+- Cover download, video download, and optional audio extraction.
+- Optional local Whisper voice transcription.
 - A Codex-compatible skill under `skills/douyin-creator-archiver/`.
 
 ## Responsible Use
@@ -21,6 +26,7 @@ Use this only for content you own, are authorized to archive, or may lawfully pr
 - Node.js 22.5 or newer.
 - `ffmpeg` for audio extraction.
 - `curl`, included with macOS.
+- `--mode audio` first uses every unique CDN candidate in structured `music.play_url`. Before a search result counts as qualified, a known mismatch between `music.duration` and the target video duration is rejected as background music. Downloaded candidates are tried in order and accepted only when `ffprobe` finds audio, zero video streams, and a duration within 3 seconds of the target. If all candidates are absent or invalid, `yt-dlp` may be used only after it identifies a genuine audio-only format. Muxed video + audio is always rejected.
 
 Optional bootstrap check:
 
@@ -59,8 +65,51 @@ dyca archive \
   --creator-url "https://www.douyin.com/user/..." \
   --out ./douyin-archive \
   --limit 50 \
-  --mode both
+  --min-red-hearts 1000 \
+  --mode both \
+  --transcribe true \
+  --whisper-model /absolute/path/to/ggml-small-q5_1.bin
 ```
+
+## Search the Included Business Keywords
+
+```bash
+dyca search-keywords \
+  --keywords-file ./presets/business-keywords.txt \
+  --out ./douyin-keyword-search \
+  --target-per-keyword 1 \
+  --max-scanned-per-keyword 200 \
+  --min-red-hearts 1000 \
+  --within-days 120
+```
+
+The browser types `#` before each keyword, clicks the visible search button, and processes keywords serially in one reused Douyin window. Before the next keyword it selects and deletes the old query, verifies that the input is empty, and then types the new query. Search-card observations are counted as scanned rows, including later cards loaded while scrolling; labels such as `1.2万` are parsed as 12000 red hearts. Before ingestion, the tool clicks the visible card and revalidates the exact structured `statistics.digg_count` and `create_time`. A video qualifies only when the title or description deterministically matches the keyword, `digg_count` is strictly greater than 1000, and `create_time` falls inside the rolling 120-day window. ASCII keywords such as `AI` use alphanumeric word boundaries so text such as `haerin` is not a match; Chinese keywords use exact normalized substring matching. Keyword search excludes `刘思毅` and `群响刘老板` by default, supports extra `--exclude-terms`, and never reuses one accepted video for a later keyword in the same run. Use `--exclude-video-ids` to carry deduplication across resumed runs. Exact 1000, irrelevant results, image-text notes, excluded content, missing metrics, and missing publication times are excluded. The tool keeps the Douyin window open to preserve the session and restores the application that was in front before the run. It reports `results_exhausted` only when Douyin renders an explicit end marker; a stalled scroll is reported separately and is never presented as full exhaustion.
+
+For streaming ingestion, pass `--qualified-hook /absolute/path/to/hook.mjs` and optionally `--hook-concurrency 2`. Each newly qualified video is opened in the original tab, revalidated for a usable full-duration pure-audio candidate, duplicated into a background backup tab, queued as `transactions/<video_id>/qualified-item.json`, and then the original tab immediately returns through browser history to the exact `#keyword` result entry. A missing or obviously short/long `music.play_url` is rejected before it consumes the keyword quota, so search can continue to a replacement. Search continues while up to two hook workers download, extract, transcribe and ingest in parallel. Note posts that add a second detail-history entry return to the captured search-history entry without submitting the keyword again. At the end the CLI waits for all workers and writes `pipeline-report.json`; any worker failure makes the final run `partial_failure` instead of hiding it.
+
+Outputs:
+
+```text
+douyin-keyword-search/
+  qualified-content.json
+  qualified-content.jsonl
+  keyword-report.json
+  logs/scanned-content.jsonl
+```
+
+## Archive Known Video URLs
+
+When another ingest tool has already found exact Douyin video URLs, skip creator-page discovery and archive those rows directly:
+
+```bash
+dyca archive-urls \
+  --input ./pending-ingest-items.jsonl \
+  --out ./douyin-archive-urls \
+  --limit 20 \
+  --mode audio
+```
+
+The input is JSONL and defaults to `source_url` for the URL and `title` for the title. Use `--url-field` or `--title-field` if your rows use different keys.
 
 Modes:
 
@@ -76,6 +125,8 @@ douyin-archive/
   creator-videos.jsonl
   videos/
   audio/
+  covers/
+  transcripts/
   logs/
 ```
 
@@ -85,15 +136,18 @@ douyin-archive/
 2. Run `dyca login` if the profile is not logged into Douyin.
 3. Run `dyca list --creator-url ... --limit ...` to inspect discovered videos.
 4. Run `dyca archive --creator-url ... --mode audio|video|both`.
-5. Summarize `creator-videos.json` and report failed items from `logs/archive-report.json`.
+5. For an upstream queue, run `dyca archive-urls --input pending-ingest-items.jsonl --mode audio`.
+6. Summarize `creator-videos.json` and report failed items from `logs/archive-report.json`.
 
 ## CLI Reference
 
 ```bash
 dyca doctor
 dyca login [--profile-dir PATH] [--port 9533]
-dyca list --creator-url URL [--out DIR] [--limit N] [--scroll-rounds N]
-dyca archive --creator-url URL [--out DIR] [--limit N] [--mode audio|video|both]
+dyca search-keywords --keywords-file FILE [--out DIR] [--target-per-keyword 1] [--max-scanned-per-keyword 200] [--min-red-hearts 1000] [--within-days 120] [--exclude-terms TERMS] [--exclude-video-ids IDS] [--qualified-hook SCRIPT] [--hook-concurrency 2]
+dyca list --creator-url URL [--out DIR] [--limit N] [--min-red-hearts N] [--scroll-rounds N]
+dyca archive --creator-url URL [--out DIR] [--limit N] [--min-red-hearts N] [--mode audio|video|both]
+dyca archive-urls --input ROWS.jsonl [--out DIR] [--limit N] [--min-red-hearts N] [--mode audio|video|both]
 ```
 
 Important options:
@@ -102,7 +156,40 @@ Important options:
 - `--chrome-path`: Chrome executable path. Defaults to `/Applications/Google Chrome.app/Contents/MacOS/Google Chrome`.
 - `--port`: CDP port. Defaults to `9533`.
 - `--delay-ms`: delay between videos. Defaults to `2500`.
+- `--min-red-hearts`: `statistics.digg_count` threshold. Defaults to `1000` and is strict (`>`). Missing values are excluded.
 - `--visible false`: run Chrome without `--new-window` visibility hints. Login still requires visible Chrome.
+- `--covers true`: explicitly opt in to cover downloads. Covers are skipped by default.
+- `--transcribe true`: generate voice transcripts with local `whisper-cli`.
+- `--whisper-model PATH`: absolute path to a whisper.cpp model. Can also use `DYCA_WHISPER_MODEL`.
+- `--yt-dlp-path PATH`: optional explicit `yt-dlp` binary path for reliable audio-only extraction. Can also use `DYCA_YT_DLP`.
+- Audio mode never falls back to a muxed video stream. `music.play_url` and any fallback must pass a zero-video `ffprobe` gate; `music.play_url` must also match the target video's duration within 3 seconds.
+
+Each `creator-videos.jsonl` row can include:
+
+```json
+{
+  "id": "7597073908935789850",
+  "title": "...",
+  "publish_time": "...",
+  "red_heart_count": 1641,
+  "favorite_count": 76,
+  "comment_count": 11,
+  "share_count": 122,
+  "cover_url": "...",
+  "audio_url": "...",
+  "audio_source": "music.play_url",
+  "download_url": "...",
+  "metadata_status": "structured"
+}
+```
+
+## Completeness Boundary
+
+`logs/list-report.json` records how creator discovery stopped. The collector watches the creator page's own `aweme/post` responses while scrolling and records `cursor` plus `has_more`. It sets `complete: true` only when pagination was observed, `has_more=false`, and the requested `--limit` did not stop the run first. Otherwise `observed_count` remains non-authoritative.
+
+The final `creator-videos.jsonl` contains only videos meeting `red_heart_count > --min-red-hearts`. `logs/list-report.json.red_heart_standard` records observed, qualified, at-or-below-threshold, and missing-metric counts. Account completeness and threshold qualification are separate: a threshold result is authoritative for the full account only when `complete=true`.
+
+Voice transcripts cover spoken audio only. Text visible in silent frames, slides, or burned-in subtitles requires a separate OCR pass.
 
 ## Known Limits
 
@@ -111,6 +198,7 @@ Important options:
 - Some media URLs expire quickly.
 - Large videos may take several minutes; downloads use resume and retries.
 - The default workflow is serial for stability, not speed.
+- Metrics are a capture-time snapshot and can change later.
 
 ## Codex Skill
 

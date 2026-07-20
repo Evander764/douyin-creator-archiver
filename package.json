@@ -1,7 +1,7 @@
 {
   "name": "douyin-creator-archiver",
-  "version": "0.1.0",
-  "description": "Mac-first Douyin creator video/audio archiver for Codex and other AI agents.",
+  "version": "0.6.0",
+  "description": "Mac-first Douyin keyword search and creator media/transcript archiver.",
   "type": "module",
   "private": false,
   "bin": {
