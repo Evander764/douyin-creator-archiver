@@ -10,7 +10,7 @@ It provides:
 - Creator-page video discovery.
 - Keyword search through the visible Douyin search box and search button, never by guessing a search URL.
 - Per-video structured metadata including `statistics.digg_count` as `red_heart_count`.
-- Keyword rules: `red_heart_count > 1000`, publication within 60 days, 1 qualified row per keyword, or switch after scanning 200 rows.
+- Keyword rules: `red_heart_count > 1000`, publication within 120 days, 1 qualified row per keyword, or switch after scanning 200 rows.
 - Known video URL archiving for upstream ingest queues.
 - Cover download, video download, and optional audio extraction.
 - Optional local Whisper voice transcription.
@@ -80,10 +80,10 @@ dyca search-keywords \
   --target-per-keyword 1 \
   --max-scanned-per-keyword 200 \
   --min-red-hearts 1000 \
-  --within-days 60
+  --within-days 120
 ```
 
-The browser types `#` before each keyword, clicks the visible search button, and processes keywords serially in one reused Douyin window. Before the next keyword it selects and deletes the old query, verifies that the input is empty, and then types the new query. A video qualifies only when the title or description deterministically matches the keyword, structured `statistics.digg_count` is strictly greater than 1000, and `create_time` falls inside the rolling 60-day window. ASCII keywords such as `AI` use alphanumeric word boundaries so text such as `haerin` is not a match; Chinese keywords use exact normalized substring matching. Exact 1000, irrelevant results, missing metrics, and missing publication times are excluded. The tool keeps the Douyin window open to preserve the session and restores the application that was in front before the run.
+The browser types `#` before each keyword, clicks the visible search button, and processes keywords serially in one reused Douyin window. Before the next keyword it selects and deletes the old query, verifies that the input is empty, and then types the new query. Search-card observations are counted as scanned rows, including later cards loaded while scrolling; labels such as `1.2万` are parsed as 12000 red hearts. Before ingestion, the tool clicks the visible card and revalidates the exact structured `statistics.digg_count` and `create_time`. A video qualifies only when the title or description deterministically matches the keyword, `digg_count` is strictly greater than 1000, and `create_time` falls inside the rolling 120-day window. ASCII keywords such as `AI` use alphanumeric word boundaries so text such as `haerin` is not a match; Chinese keywords use exact normalized substring matching. Exact 1000, irrelevant results, image-text notes, missing metrics, and missing publication times are excluded. The tool keeps the Douyin window open to preserve the session and restores the application that was in front before the run. It reports `results_exhausted` only when Douyin renders an explicit end marker; a stalled scroll is reported separately and is never presented as full exhaustion.
 
 For streaming ingestion, pass `--qualified-hook /absolute/path/to/hook.mjs` and optionally `--hook-concurrency 2`. Each newly qualified video is opened in the original tab, duplicated into a background backup tab, queued as `transactions/<video_id>/qualified-item.json`, and then the original tab immediately returns through browser history to the exact `#keyword` result entry. Search continues while up to two hook workers download, extract, transcribe and ingest in parallel. Note posts that add a second detail-history entry return to the captured search-history entry without submitting the keyword again. At the end the CLI waits for all workers and writes `pipeline-report.json`; any worker failure makes the final run `partial_failure` instead of hiding it.
 
@@ -144,7 +144,7 @@ douyin-archive/
 ```bash
 dyca doctor
 dyca login [--profile-dir PATH] [--port 9533]
-dyca search-keywords --keywords-file FILE [--out DIR] [--target-per-keyword 1] [--max-scanned-per-keyword 200] [--min-red-hearts 1000] [--within-days 60] [--qualified-hook SCRIPT] [--hook-concurrency 2]
+dyca search-keywords --keywords-file FILE [--out DIR] [--target-per-keyword 1] [--max-scanned-per-keyword 200] [--min-red-hearts 1000] [--within-days 120] [--qualified-hook SCRIPT] [--hook-concurrency 2]
 dyca list --creator-url URL [--out DIR] [--limit N] [--min-red-hearts N] [--scroll-rounds N]
 dyca archive --creator-url URL [--out DIR] [--limit N] [--min-red-hearts N] [--mode audio|video|both]
 dyca archive-urls --input ROWS.jsonl [--out DIR] [--limit N] [--min-red-hearts N] [--mode audio|video|both]

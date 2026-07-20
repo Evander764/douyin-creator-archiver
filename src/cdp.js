@@ -3,6 +3,7 @@ import { promisify } from 'node:util';
 import { DEFAULT_CDP_PORT, DEFAULT_CHROME_PATH, sleep } from './utils.js';
 
 const DEFAULT_WINDOW_BOUNDS = { left: 80, top: 80, width: 1280, height: 900 };
+export const REUSABLE_CHROME_SPAWN_OPTIONS = Object.freeze({ detached: true, stdio: 'ignore' });
 const execFileAsync = promisify(execFile);
 
 export async function captureFrontmostApplication() {
@@ -66,7 +67,7 @@ export async function launchChrome({
   args.push(url);
   // Chrome is a reusable local browser service. Ignore its stdio and unref the
   // child so successful CLI commands can exit instead of waiting on Chrome.
-  const child = spawn(chromePath, args, { detached: false, stdio: 'ignore' });
+  const child = spawn(chromePath, args, REUSABLE_CHROME_SPAWN_OPTIONS);
   let launchError = null;
   child.on('error', (error) => { launchError = error; });
   child.unref();

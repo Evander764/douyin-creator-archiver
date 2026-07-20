@@ -45,10 +45,10 @@ Ask the user to finish login or verification in the opened Chrome window.
 3. For keyword search, use the visible search-box workflow:
 
 ```bash
-dyca search-keywords --keywords-file ./presets/business-keywords.txt --out ./douyin-keyword-search --target-per-keyword 1 --max-scanned-per-keyword 200 --min-red-hearts 1000 --within-days 60
+dyca search-keywords --keywords-file ./presets/business-keywords.txt --out ./douyin-keyword-search --target-per-keyword 1 --max-scanned-per-keyword 200 --min-red-hearts 1000 --within-days 120
 ```
 
-The command must reuse one Douyin window, select and delete the previous query, verify the box is empty, type `#keyword`, and click the visible search button. It must not construct a search-result URL. Qualify only `statistics.digg_count > 1000` plus publication inside the rolling 60-day window. Switch after the first qualified row or 200 scanned rows. Keep the Douyin page open to preserve the session, disconnect control on exit, and restore the previously frontmost application.
+The command must reuse one Douyin window, select and delete the previous query, verify the box is empty, type `#keyword`, and click the visible search button. It must not construct a search-result URL. Count visible waterfall cards loaded during scrolling, parse abbreviated red-heart labels such as `1.2万`, click a qualifying visible card, and revalidate exact structured `statistics.digg_count > 1000` plus publication inside the rolling 120-day window before ingestion. Switch after the first verified qualified row or 200 scanned rows. Never report `results_exhausted` unless Douyin renders an explicit end marker; report a stalled scroll separately. Keep the Douyin page open to preserve the session, disconnect control on exit, and restore the previously frontmost application.
 
 When the workflow requires streaming ingestion, pass `--qualified-hook <absolute-script.mjs>` and optionally `--hook-concurrency 2`. For every qualified item, duplicate the detail into a background backup tab, queue the worker, return the original tab to the exact captured search-history entry, verify the query and continue searching immediately. Search-page control remains serial; only background workers run concurrently. Back failure stops search. Worker failures are collected in `pipeline-report.json` and make the final run `partial_failure`; they do not silently stop the search lane. Never submit the current keyword again after an item has been queued.
 
@@ -94,7 +94,7 @@ Default JSONL fields are `source_url` and `title`. Use `--url-field` or `--title
 - Output folder: `./douyin-archive`
 - Run style: serial stable mode
 - Qualification: `statistics.digg_count > 1000`; exact 1000 and missing values are excluded
-- Keyword time window: rolling 60 days; missing timestamps are excluded
+- Keyword time window: rolling 120 days; missing timestamps are excluded
 - Cover downloads: off by default
 
 ## Troubleshooting

@@ -32,7 +32,7 @@ function usage() {
 Usage:
   dyca doctor
   dyca login [--profile-dir PATH] [--port 9533]
-  dyca search-keywords --keywords-file FILE [--out DIR] [--target-per-keyword 1] [--max-scanned-per-keyword 200] [--min-red-hearts 1000] [--within-days 60] [--qualified-hook SCRIPT] [--hook-concurrency 2]
+  dyca search-keywords --keywords-file FILE [--out DIR] [--target-per-keyword 1] [--max-scanned-per-keyword 200] [--min-red-hearts 1000] [--within-days 120] [--qualified-hook SCRIPT] [--hook-concurrency 2]
   dyca list --creator-url URL [--out DIR] [--limit N] [--min-red-hearts 1000]
   dyca archive --creator-url URL [--out DIR] [--limit N] [--min-red-hearts 1000] [--mode audio|video|both] [--transcribe true --whisper-model PATH]
   dyca archive-urls --input ROWS.jsonl [--out DIR] [--limit N] [--min-red-hearts 1000] [--mode audio|video|both] [--transcribe true --whisper-model PATH]
@@ -444,9 +444,13 @@ function logKeywordProgress(event = {}) {
   } else if (event.phase === 'keyword_resume') {
     console.error(`resume ${event.keyword}: seeded=${event.seeded}`);
   } else if (event.phase === 'qualified_start') {
-    console.error(`ingest ${event.keyword}: ${event.item.id} start`);
+    console.error(`verify ${event.keyword}: ${event.item.id} detail opened`);
+  } else if (event.phase === 'backup_tab_created') {
+    console.error(`copy ${event.keyword}: ${event.item.id} backup tab=${event.backup_target_id}`);
   } else if (event.phase === 'qualified_done') {
-    console.error(`ingest ${event.keyword}: ${event.item.id} applied; browser back verified`);
+    console.error(`queue ${event.keyword}: ${event.item.id} copied; browser back verified`);
+  } else if (event.phase === 'qualified_rejected') {
+    console.error(`reject ${event.keyword}: ${event.item.id} reason=${event.transaction?.rejected_reason || 'unknown'}`);
   }
 }
 
@@ -582,7 +586,7 @@ async function commandSearchKeywords(args) {
     targetPerKeyword: positiveInteger(args['target-per-keyword'], 1, '--target-per-keyword', 100),
     maxScannedPerKeyword: positiveInteger(args['max-scanned-per-keyword'], 200, '--max-scanned-per-keyword', 5000),
     minRedHearts: minimumRedHearts(args),
-    withinDays: positiveInteger(args['within-days'], 60, '--within-days', 3650),
+    withinDays: positiveInteger(args['within-days'], 120, '--within-days', 3650),
     maxScrollRounds: positiveInteger(args['max-scroll-rounds'], 80, '--max-scroll-rounds', 500),
     scrollDelayMs: Math.max(500, Number(args['scroll-delay-ms'] || 2500)),
     responseWaitMs: Math.max(3000, Number(args['response-wait-ms'] || 15000)),

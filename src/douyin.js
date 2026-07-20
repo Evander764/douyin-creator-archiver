@@ -76,20 +76,20 @@ export function normalizeStructuredVideo(aweme = {}, defaults = {}) {
 async function openQualifiedVideo(client, item, searchQuery) {
   const id = String(item.id || parseDouyinVideoId(item.url) || '');
   if (!id) throw new Error('Qualified item is missing a Douyin video id');
-  const detailUrl = normalizeVideoUrl(item.url || `https://www.douyin.com/video/${id}`);
   const origin = await client.evaluate(`(() => {
     const root = document.scrollingElement || document.documentElement;
     const anchor = [...document.querySelectorAll('a[href*="/video/"]')]
       .find((node) => String(node.href || '').includes('/video/' + ${JSON.stringify(id)}));
+    const card = document.getElementById('waterfall_item_' + ${JSON.stringify(id)});
     const before = { href: location.href, scroll_top: root.scrollTop };
-    if (!anchor) {
-      setTimeout(() => location.assign(${JSON.stringify(detailUrl)}), 0);
-      return { ok: true, opened_by: 'same_tab_structured_result_url', ...before };
+    const target = anchor || card?.querySelector('.videoImage') || card?.querySelector('.search-result-card') || card;
+    if (!target) {
+      return { ok: false, reason: 'visible_result_card_not_found', ...before };
     }
-    anchor.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'instant' });
-    anchor.removeAttribute('target');
-    anchor.click();
-    return { ok: true, opened_by: 'visible_result_card', ...before };
+    target.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'instant' });
+    if (anchor) anchor.removeAttribute('target');
+    target.click();
+    return { ok: true, opened_by: anchor ? 'visible_result_link' : 'visible_result_card', ...before };
   })()`);
   if (!origin?.ok) throw new Error(`Douyin qualified-item open failed: ${origin?.reason || 'unknown'}`);
   const deadline = Date.now() + 30000;
@@ -175,13 +175,44 @@ async function currentSearchMatches(client, searchQuery) {
 export async function processQualifiedItemTransaction(client, item, {
   searchQuery,
   onQualified,
+  keyword = '',
+  minRedHearts = 1000,
+  withinDays = 120,
+  capturedAt = new Date().toISOString(),
+  onBackupCreated = null,
 } = {}) {
-  if (typeof onQualified !== 'function') return { processed: false };
   const origin = await openQualifiedVideo(client, item, searchQuery);
-  const backup = await duplicateQualifiedDetail(client, origin);
-  const receipt = await onQualified(item, { ...origin, ...backup, phase: 'queued_with_backup' });
-  await backToSearchResults(client, origin);
-  return { processed: true, receipt, backup };
+  try {
+    const detail = await fetchStructuredVideoDetailWithRetry(client, item.url, item);
+    if (!detail.ok) {
+      return { processed: false, rejected_reason: detail.error || 'structured_detail_unavailable' };
+    }
+    const verification = applyKeywordSearchStandard([detail.item], {
+      keyword,
+      minRedHearts,
+      withinDays,
+      target: 1,
+      maxScanned: 1,
+      capturedAt,
+    });
+    const verifiedItem = verification.qualified_items[0];
+    if (!verifiedItem) {
+      return {
+        processed: false,
+        rejected_reason: 'structured_detail_did_not_qualify',
+        verification: verification.standard,
+      };
+    }
+    if (typeof onQualified !== 'function') {
+      return { processed: true, item: verifiedItem, receipt: null, backup: null };
+    }
+    const backup = await duplicateQualifiedDetail(client, origin);
+    onBackupCreated?.({ item: verifiedItem, ...backup });
+    const receipt = await onQualified(verifiedItem, { ...origin, ...backup, phase: 'queued_with_backup' });
+    return { processed: true, item: verifiedItem, receipt, backup };
+  } finally {
+    await backToSearchResults(client, origin);
+  }
 }
 
 export function parseLengthPrefixedJsonStream(input = '') {
@@ -248,6 +279,83 @@ function numericMetric(value) {
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
 }
 
+export function parseAbbreviatedCount(value) {
+  const text = String(value ?? '').normalize('NFKC').trim().toLowerCase().replace(/[,+\s]/g, '');
+  const match = text.match(/^(\d+(?:\.\d+)?)(万|w|亿)?$/i);
+  if (!match) return null;
+  const number = Number(match[1]);
+  const multiplier = match[2] === '亿' ? 100_000_000 : (match[2] === '万' || match[2] === 'w' ? 10_000 : 1);
+  const parsed = Math.round(number * multiplier);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
+}
+
+function shanghaiDateParts(date) {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Shanghai',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(date);
+  return Object.fromEntries(parts.filter((part) => part.type !== 'literal').map((part) => [part.type, Number(part.value)]));
+}
+
+function shanghaiEndOfDayUtc(year, month, day) {
+  const value = Date.UTC(year, month - 1, day, 15, 59, 59, 999);
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+export function parseDouyinSearchDate(value, capturedAt = new Date().toISOString()) {
+  const capturedAtMs = Date.parse(capturedAt);
+  if (!Number.isFinite(capturedAtMs)) throw new Error('capturedAt must be a valid timestamp');
+  const text = compact(value).replace(/^[·•\s]+/, '').replace(/^发布于\s*/, '');
+  if (!text) return null;
+  if (/^(刚刚|片刻前)$/.test(text)) return new Date(capturedAtMs).toISOString();
+  const relative = text.match(/^(\d+(?:\.\d+)?)\s*(分钟|小时|天|周)前$/);
+  if (relative) {
+    const unitMs = { 分钟: 60_000, 小时: 3_600_000, 天: 86_400_000, 周: 604_800_000 }[relative[2]];
+    return new Date(capturedAtMs - (Number(relative[1]) * unitMs)).toISOString();
+  }
+  if (/^(今天|昨天|前天)$/.test(text)) {
+    const days = text === '今天' ? 0 : (text === '昨天' ? 1 : 2);
+    return new Date(capturedAtMs - (days * 86_400_000)).toISOString();
+  }
+  const explicit = text.match(/^(?:(\d{4})年)?(\d{1,2})月(\d{1,2})日$/);
+  if (!explicit) return null;
+  const captured = new Date(capturedAtMs);
+  const local = shanghaiDateParts(captured);
+  let year = explicit[1] ? Number(explicit[1]) : local.year;
+  const month = Number(explicit[2]);
+  const day = Number(explicit[3]);
+  let date = shanghaiEndOfDayUtc(year, month, day);
+  if (!date || shanghaiDateParts(date).month !== month || shanghaiDateParts(date).day !== day) return null;
+  if (!explicit[1] && date.getTime() > capturedAtMs + 86_400_000) {
+    year -= 1;
+    date = shanghaiEndOfDayUtc(year, month, day);
+  }
+  return date?.toISOString() || null;
+}
+
+export function normalizeSearchCardObservation(raw = {}, capturedAt = new Date().toISOString()) {
+  const id = String(raw.id || '').replace(/^waterfall_item_/, '');
+  if (!/^\d{6,}$/.test(id) || raw.kind === '图文') return null;
+  const redHeartCount = parseAbbreviatedCount(raw.metric_text);
+  const publishTime = parseDouyinSearchDate(raw.date_text, capturedAt);
+  if (!compact(raw.title) || redHeartCount === null) return null;
+  return {
+    id,
+    url: `https://www.douyin.com/video/${id}`,
+    title: compact(raw.title),
+    description: compact(raw.title),
+    author_name: compact(raw.author_name).replace(/^@/, '') || null,
+    publish_time: publishTime,
+    red_heart_count: redHeartCount,
+    red_heart_display: compact(raw.metric_text),
+    red_heart_source: 'search_card_heart_label',
+    metadata_status: 'search_card_dom',
+  };
+}
+
 export function itemMatchesKeyword(item, keyword = '') {
   const needle = compact(keyword).replace(/^#+/, '').normalize('NFKC').toLowerCase();
   if (!needle) return true;
@@ -266,7 +374,7 @@ export function keywordSearchAttemptLimit(resumeCurrent = false) {
 export function applyKeywordSearchStandard(items = [], {
   keyword = '',
   minRedHearts = 1000,
-  withinDays = 60,
+  withinDays = 120,
   target = 1,
   maxScanned = 200,
   capturedAt = new Date().toISOString(),
@@ -345,6 +453,16 @@ export async function fetchStructuredVideoDetail(client, videoUrl, defaults = {}
   } catch (error) {
     return { ok: false, error: error.message || 'structured_fetch_failed', item: null };
   }
+}
+
+async function fetchStructuredVideoDetailWithRetry(client, videoUrl, defaults = {}, attempts = 6) {
+  let last = { ok: false, error: 'structured_detail_unavailable', item: null };
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    last = await fetchStructuredVideoDetail(client, videoUrl, defaults);
+    if (last.ok) return last;
+    if (attempt < attempts) await sleep(750);
+  }
+  return last;
 }
 
 export function parseCreatorPostPayload(payload = {}) {
@@ -429,6 +547,31 @@ async function collectVisibleVideoLinks(client) {
       return out;
     })()
   `);
+}
+
+async function collectVisibleSearchCards(client, capturedAt) {
+  const raw = await client.evaluate(`
+    (() => {
+      const clean = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
+      return [...document.querySelectorAll('[id^="waterfall_item_"]')].map((card) => {
+        const lines = String(card.innerText || '').split('\\n').map(clean).filter(Boolean);
+        const dateLine = lines.findLast((line) => /^(?:·\\s*)?(?:刚刚|片刻前|今天|昨天|前天|\\d+(?:\\.\\d+)?\\s*(?:分钟|小时|天|周)前|(?:(?:\\d{4})年)?\\d{1,2}月\\d{1,2}日)$/.test(line));
+        const authorIndex = dateLine ? lines.indexOf(dateLine) - 1 : -1;
+        const metricText = clean(card.querySelector('.pMq55q1M span:last-child')?.innerText || lines[1]);
+        const title = clean(card.querySelector('.BjLsdJMi')?.innerText
+          || (authorIndex > 2 ? lines.slice(2, authorIndex).join(' ') : lines[2]));
+        return {
+          id: card.id,
+          kind: clean(card.querySelector('.FnM1bbIQ')?.innerText || lines[0]),
+          metric_text: metricText,
+          title,
+          author_name: clean(card.querySelector('.WldPmwm5')?.innerText || (authorIndex >= 0 ? lines[authorIndex] : '')),
+          date_text: clean(card.querySelector('.dO8W7uoF')?.innerText || dateLine),
+        };
+      });
+    })()
+  `);
+  return raw.map((item) => normalizeSearchCardObservation(item, capturedAt)).filter(Boolean);
 }
 
 async function waitForSearchInput(client, { timeoutMs = 60000 } = {}) {
@@ -635,7 +778,7 @@ export async function collectKeywordSearchBatch({
   targetPerKeyword = 1,
   maxScannedPerKeyword = 200,
   minRedHearts = 1000,
-  withinDays = 60,
+  withinDays = 120,
   maxScrollRounds = 80,
   scrollDelayMs = 2500,
   responseWaitMs = 15000,
@@ -691,7 +834,8 @@ export async function collectKeywordSearchBatch({
           .filter((item) => item?.id)
           .map((item) => [String(item.id), item]),
       );
-      const processedQualifiedIds = new Set(observed.keys());
+      const verifiedQualifiedItems = new Map(observed);
+      const attemptedCandidateIds = new Set(observed.keys());
       let parsedResponses = 0;
       let roundsCompleted = 0;
       let searchAttempts = 0;
@@ -734,6 +878,47 @@ export async function collectKeywordSearchBatch({
           for (const item of drained.items) {
             if (item.id && !observed.has(item.id)) observed.set(item.id, item);
           }
+          const cardItems = await collectVisibleSearchCards(client, capturedAt);
+          for (const item of cardItems) {
+            if (item.id && !observed.has(item.id)) observed.set(item.id, item);
+          }
+          while (verifiedQualifiedItems.size < targetPerKeyword) {
+            selection = applyKeywordSearchStandard([...observed.values()], {
+              keyword,
+              minRedHearts,
+              withinDays,
+              target: targetPerKeyword,
+              maxScanned: maxScannedPerKeyword,
+              capturedAt,
+            });
+            const qualifiedItem = selection.qualified_items
+              .find((candidate) => !attemptedCandidateIds.has(String(candidate.id || parseDouyinVideoId(candidate.url) || '')));
+            if (!qualifiedItem) break;
+            const qualifiedId = String(qualifiedItem.id || parseDouyinVideoId(qualifiedItem.url) || '');
+            attemptedCandidateIds.add(qualifiedId);
+            onProgress?.({ phase: 'qualified_start', keyword, item: qualifiedItem });
+            const transaction = await processQualifiedItemTransaction(client, qualifiedItem, {
+              searchQuery,
+              onQualified,
+              keyword,
+              minRedHearts,
+              withinDays,
+              capturedAt,
+              onBackupCreated: (backup) => onProgress?.({ phase: 'backup_tab_created', keyword, ...backup }),
+            });
+            if (transaction.processed) {
+              verifiedQualifiedItems.set(qualifiedId, transaction.item);
+              observed.set(qualifiedId, transaction.item);
+              onProgress?.({ phase: 'qualified_done', keyword, item: transaction.item, transaction });
+            } else {
+              observed.set(qualifiedId, {
+                ...qualifiedItem,
+                red_heart_count: null,
+                structured_verification_error: transaction.rejected_reason,
+              });
+              onProgress?.({ phase: 'qualified_rejected', keyword, item: qualifiedItem, transaction });
+            }
+          }
           selection = applyKeywordSearchStandard([...observed.values()], {
             keyword,
             minRedHearts,
@@ -747,24 +932,13 @@ export async function collectKeywordSearchBatch({
             keyword,
             round: round + 1,
             scanned: selection.standard.scanned_count,
-            qualified: selection.standard.qualified_count,
+            qualified: verifiedQualifiedItems.size,
           });
-          for (const qualifiedItem of selection.qualified_items) {
-            const qualifiedId = String(qualifiedItem.id || parseDouyinVideoId(qualifiedItem.url) || '');
-            if (!qualifiedId || processedQualifiedIds.has(qualifiedId)) continue;
-            onProgress?.({ phase: 'qualified_start', keyword, item: qualifiedItem });
-            const transaction = await processQualifiedItemTransaction(client, qualifiedItem, {
-              searchQuery: keyword.startsWith('#') ? keyword : `#${keyword}`,
-              onQualified,
-            });
-            processedQualifiedIds.add(qualifiedId);
-            onProgress?.({ phase: 'qualified_done', keyword, item: qualifiedItem, transaction });
-          }
           if (round === 0 && parsedResponses === 0 && observed.size === 0 && !resumeThisKeyword) {
             stopReason = 'no_search_response';
             break;
           }
-          if (selection.standard.qualified_count >= targetPerKeyword) {
+          if (verifiedQualifiedItems.size >= targetPerKeyword) {
             stopReason = 'target_reached';
             break;
           }
@@ -781,14 +955,17 @@ export async function collectKeywordSearchBatch({
             break;
           }
           stableRounds = observed.size === before && scroll.at_end && !scroll.moved ? stableRounds + 1 : 0;
-          if (stableRounds >= 3) {
-            stopReason = 'results_exhausted';
+          if (stableRounds >= 5) {
+            stopReason = 'scroll_stalled_before_scan_limit';
             break;
           }
         }
-        if (parsedResponses > 0 || (resumeThisKeyword && attempt === 1)) break;
+        if (stopReason === 'no_search_response' && observed.size > 0) stopReason = 'scroll_round_limit_reached';
+        if (parsedResponses > 0 || observed.size > 0 || (resumeThisKeyword && attempt === 1)) break;
       }
-      if (parsedResponses === 0 && !resumeThisKeyword) throw new Error(`Douyin returned no structured search response after 2 attempts: ${keyword}`);
+      if (parsedResponses === 0 && observed.size === 0 && !resumeThisKeyword) {
+        throw new Error(`Douyin returned neither structured responses nor visible result cards after 2 attempts: ${keyword}`);
+      }
       const report = {
         keyword,
         search_query: searchQuery,
@@ -800,10 +977,11 @@ export async function collectKeywordSearchBatch({
         observed_unique_count: observed.size,
         resumed_from_existing_results: resumeThisKeyword,
         ...selection.standard,
+        qualified_count: verifiedQualifiedItems.size,
       };
       keywordReports.push(report);
       scannedItems.push(...selection.scanned_items);
-      qualifiedItems.push(...selection.qualified_items);
+      qualifiedItems.push(...verifiedQualifiedItems.values());
       onProgress?.({ phase: 'keyword_done', ...report });
       await onCheckpoint?.({
         captured_at: capturedAt,

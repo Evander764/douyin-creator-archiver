@@ -4,14 +4,18 @@ import { mkdirSync, mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parseArgs, sanitizeSegment } from '../src/utils.js';
+import { REUSABLE_CHROME_SPAWN_OPTIONS } from '../src/cdp.js';
 import {
   applyKeywordSearchStandard,
   normalizeStructuredVideo,
   normalizeVideoUrl,
   parseCreatorPostPayload,
+  parseAbbreviatedCount,
   parseDouyinVideoId,
+  parseDouyinSearchDate,
   parseLengthPrefixedJsonStream,
   parseSearchStreamBody,
+  normalizeSearchCardObservation,
   itemMatchesKeyword,
   keywordSearchAttemptLimit,
   processQualifiedItemTransaction,
@@ -25,6 +29,11 @@ test('parseDouyinVideoId supports video and modal urls', () => {
   assert.equal(parseDouyinVideoId('https://www.douyin.com/video/7611095597914918153'), '7611095597914918153');
   assert.equal(parseDouyinVideoId('https://www.douyin.com/search/x?modal_id=7611095597914918153&type=video'), '7611095597914918153');
   assert.equal(normalizeVideoUrl('https://www.douyin.com/search/x?modal_id=7611095597914918153&type=video'), 'https://www.douyin.com/video/7611095597914918153');
+});
+
+test('dedicated Chrome is detached so CLI exit cannot close the reusable Douyin window', () => {
+  assert.equal(REUSABLE_CHROME_SPAWN_OPTIONS.detached, true);
+  assert.equal(REUSABLE_CHROME_SPAWN_OPTIONS.stdio, 'ignore');
 });
 
 test('parseArgs handles flags and values', () => {
@@ -138,7 +147,7 @@ test('search stream parser handles byte-length-prefixed UTF-8 JSON frames', () =
   assert.equal(videos[0].red_heart_count, 1300);
 });
 
-test('keyword search standard requires >1000 red hearts and publication within 60 days', () => {
+test('keyword search standard requires >1000 red hearts and publication within 120 days', () => {
   const capturedAt = '2026-07-20T12:00:00.000Z';
   const make = (id, redHeartCount, publishTime) => ({
     id,
@@ -149,15 +158,40 @@ test('keyword search standard requires >1000 red hearts and publication within 6
   });
   const result = applyKeywordSearchStandard([
     make('7611095597914918101', 1000, '2026-07-20T00:00:00.000Z'),
-    make('7611095597914918102', 1001, '2026-05-21T11:59:59.000Z'),
-    make('7611095597914918103', 1001, '2026-05-21T12:00:00.000Z'),
+    make('7611095597914918102', 1001, '2026-03-22T11:59:59.000Z'),
+    make('7611095597914918103', 1001, '2026-03-22T12:00:00.000Z'),
     make('7611095597914918104', 5000, null),
-  ], { keyword: '创业', capturedAt, minRedHearts: 1000, withinDays: 60, target: 10, maxScanned: 200 });
+  ], { keyword: '创业', capturedAt, minRedHearts: 1000, withinDays: 120, target: 10, maxScanned: 200 });
   assert.deepEqual(result.qualified_items.map((item) => item.id), ['7611095597914918103']);
   assert.equal(result.standard.red_heart_operator, '>');
   assert.equal(result.standard.red_heart_at_or_below_count, 1);
   assert.equal(result.standard.outside_time_window_count, 1);
   assert.equal(result.standard.missing_publish_time_count, 1);
+});
+
+test('search-card parsing expands 万/亿 and resolves Douyin dates in Asia/Shanghai', () => {
+  assert.equal(parseAbbreviatedCount('1.2万'), 12000);
+  assert.equal(parseAbbreviatedCount('45.0万'), 450000);
+  assert.equal(parseAbbreviatedCount('1.6亿'), 160000000);
+  assert.equal(parseAbbreviatedCount('1,001'), 1001);
+  assert.equal(parseDouyinSearchDate('· 19小时前', '2026-07-20T12:00:00.000Z'), '2026-07-19T17:00:00.000Z');
+  assert.equal(parseDouyinSearchDate('3月27日', '2026-07-20T12:00:00.000Z'), '2026-03-27T15:59:59.999Z');
+  assert.equal(parseDouyinSearchDate('2025年12月24日', '2026-07-20T12:00:00.000Z'), '2025-12-24T15:59:59.999Z');
+  assert.equal(normalizeSearchCardObservation({
+    id: 'waterfall_item_7621509241727225131',
+    kind: '05:39',
+    metric_text: '1.0万',
+    title: '年入百万并没有那么难 #年入百万',
+    author_name: '@群响刘思毅',
+    date_text: '· 3月27日',
+  }, '2026-07-20T12:00:00.000Z').red_heart_count, 10000);
+  assert.equal(normalizeSearchCardObservation({
+    id: 'waterfall_item_7516737796636216585',
+    kind: '图文',
+    metric_text: '1448',
+    title: '图文内容',
+    date_text: '2025年6月16日',
+  }, '2026-07-20T12:00:00.000Z'), null);
 });
 
 test('keyword relevance rejects ASCII substrings but accepts real AI terms', () => {
@@ -223,6 +257,20 @@ test('qualified item transaction applies ingestion before browser back and verif
       if (expression.includes('title: document.title')) {
         return { href: 'https://www.douyin.com/video/7611095597914918153', title: 'detail' };
       }
+      if (expression.includes("const endpoint = new URL('/aweme/v1/web/aweme/detail/'")) {
+        return {
+          ok: true,
+          status: 200,
+          data: {
+            aweme_detail: {
+              aweme_id: '7611095597914918153',
+              desc: '创业方法',
+              create_time: Math.floor(Date.now() / 1000),
+              statistics: { digg_count: 1001 },
+            },
+          },
+        };
+      }
       if (expression.includes("const input =")) {
         return { href: 'https://www.douyin.com/search/%23创业', value: '#创业' };
       }
@@ -277,6 +325,20 @@ test('qualified item transaction returns through browser history when a note add
       }
       if (expression.includes('title: document.title')) {
         return { href: 'https://www.douyin.com/note/7611095597914918153', title: 'detail' };
+      }
+      if (expression.includes("const endpoint = new URL('/aweme/v1/web/aweme/detail/'")) {
+        return {
+          ok: true,
+          status: 200,
+          data: {
+            aweme_detail: {
+              aweme_id: '7611095597914918153',
+              desc: 'AI 方法',
+              create_time: Math.floor(Date.now() / 1000),
+              statistics: { digg_count: 1001 },
+            },
+          },
+        };
       }
       if (expression.includes("const input =")) {
         return page === 'search'
