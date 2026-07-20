@@ -149,7 +149,7 @@ Each `creator-videos.jsonl` row can include:
 
 ## Completeness Boundary
 
-`logs/list-report.json` always records how creator discovery stopped. The current creator-page discovery uses serial DOM scrolling and therefore sets `complete: false`; `observed_count` is not an authoritative creator total. The tool does not claim a full account archive unless a future cursor/`has_more` implementation and count reconciliation prove exhaustion.
+`logs/list-report.json` records how creator discovery stopped. The collector watches the creator page's own `aweme/post` responses while scrolling and records `cursor` plus `has_more`. It sets `complete: true` only when pagination was observed, `has_more=false`, and the requested `--limit` did not stop the run first. Otherwise `observed_count` remains non-authoritative.
 
 Voice transcripts cover spoken audio only. Text visible in silent frames, slides, or burned-in subtitles requires a separate OCR pass.
 

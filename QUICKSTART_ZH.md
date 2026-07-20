@@ -40,7 +40,7 @@ dyca list \
 - `output/creator-videos.jsonl`
 - `output/logs/list-report.json`
 
-`complete: false` 表示当前只确认抓到了这些视频，不能宣称已经穷尽博主全部作品。
+只有同时满足以下条件才会写入 `complete: true`：代码监听到了主页自己的分页响应、分页明确返回 `has_more=false`，并且没有先撞到 `--limit`。`complete: false` 表示当前只确认抓到了这些视频，不能宣称已经穷尽博主全部作品。
 
 ## 4. 下载封面、音频并生成逐字稿
 

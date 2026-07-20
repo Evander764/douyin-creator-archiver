@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parseArgs, sanitizeSegment } from '../src/utils.js';
-import { normalizeStructuredVideo, normalizeVideoUrl, parseDouyinVideoId } from '../src/douyin.js';
+import { normalizeStructuredVideo, normalizeVideoUrl, parseCreatorPostPayload, parseDouyinVideoId } from '../src/douyin.js';
 import { writeArchiveReport } from '../src/cli.js';
 
 test('parseDouyinVideoId supports video and modal urls', () => {
@@ -54,4 +54,22 @@ test('writeArchiveReport persists final failed state', () => {
   writeArchiveReport(root, { ok: true, total: 1, succeeded: 0, failed: 1, items: [] });
   const saved = JSON.parse(readFileSync(join(logs, 'archive-report.json'), 'utf8'));
   assert.equal(saved.ok, false);
+});
+
+test('parseCreatorPostPayload preserves cursor exhaustion evidence', () => {
+  const page = parseCreatorPostPayload({
+    aweme_list: [{
+      aweme_id: '7611095597914918153',
+      desc: '分页视频',
+      statistics: { digg_count: 8, collect_count: 2 },
+      video: { cover: { url_list: ['https://img.example/page.jpg'] } },
+    }],
+    has_more: 0,
+    max_cursor: 123,
+  });
+  assert.equal(page.items.length, 1);
+  assert.equal(page.items[0].like_count, 8);
+  assert.equal(page.items[0].favorite_count, 2);
+  assert.equal(page.has_more, false);
+  assert.equal(page.cursor, 123);
 });

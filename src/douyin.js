@@ -84,6 +84,40 @@ export async function fetchStructuredVideoDetail(client, videoUrl, defaults = {}
   }
 }
 
+export function parseCreatorPostPayload(payload = {}) {
+  const data = payload?.data && typeof payload.data === 'object' ? payload.data : payload;
+  const awemeList = data.aweme_list || data.awemeList || [];
+  const marker = data.has_more ?? data.hasMore;
+  const hasMore = marker === undefined || marker === null
+    ? null
+    : marker === true || marker === 1 || marker === '1';
+  return {
+    items: Array.isArray(awemeList) ? awemeList.map((aweme) => normalizeStructuredVideo(aweme)) : [],
+    has_more: hasMore,
+    cursor: data.max_cursor ?? data.maxCursor ?? data.cursor ?? null,
+  };
+}
+
+async function drainCreatorPostResponses(client, queue = []) {
+  const result = { items: [], has_more: null, cursor: null, responses: 0 };
+  while (queue.length) {
+    const response = queue.shift();
+    try {
+      const body = await client.send('Network.getResponseBody', { requestId: response.requestId }, { timeoutMs: 5000 });
+      let text = body?.body || '';
+      if (body?.base64Encoded) text = Buffer.from(text, 'base64').toString('utf8');
+      const page = parseCreatorPostPayload(JSON.parse(text));
+      result.items.push(...page.items);
+      if (page.has_more !== null) result.has_more = page.has_more;
+      if (page.cursor !== null) result.cursor = page.cursor;
+      result.responses += 1;
+    } catch (error) {
+      if (process.env.DYCA_DEBUG_NETWORK) console.error(`creator-post body error: ${error.message}`);
+    }
+  }
+  return result;
+}
+
 function uniqByVideoId(items = []) {
   const seen = new Set();
   const out = [];
@@ -150,23 +184,65 @@ export async function collectCreatorSnapshot({
   const client = new CDPClient({ commandTimeoutMs: 30000 });
   await client.connect(port, { initialUrl: 'https://www.douyin.com/' });
   try {
+    const postResponses = [];
+    const postRequestIds = new Set();
+    try {
+      await client.send('Network.enable');
+      client.on('Network.responseReceived', (params) => {
+        const url = String(params.response?.url || '');
+        if (/aweme\/v1\/web\/aweme\/post/i.test(url)) {
+          postRequestIds.add(params.requestId);
+        }
+      });
+      client.on('Network.loadingFinished', (params) => {
+        if (!postRequestIds.delete(params.requestId)) return;
+        postResponses.push({ requestId: params.requestId });
+      });
+      client.on('Network.loadingFailed', (params) => {
+        postRequestIds.delete(params.requestId);
+      });
+    } catch {}
     await client.goto(creatorUrl, 6000);
     await waitForUsableDouyinPage(client);
     let videos = [];
+    const structured = new Map();
     let stableRounds = 0;
     let roundsCompleted = 0;
     let stopReason = 'scroll_rounds_exhausted';
+    let paginationObserved = false;
+    let hasMore = null;
+    let cursor = null;
+    const refreshStructured = async () => {
+      const page = await drainCreatorPostResponses(client, postResponses);
+      if (page.responses) paginationObserved = true;
+      if (page.has_more !== null) hasMore = page.has_more;
+      if (page.cursor !== null) cursor = page.cursor;
+      for (const item of page.items) {
+        if (item.id && !structured.has(item.id)) structured.set(item.id, item);
+      }
+    };
+    const mergeObserved = (domVideos = []) => uniqByVideoId([
+      ...structured.values(),
+      ...domVideos,
+    ]).slice(0, limit);
+    await refreshStructured();
     for (let round = 0; round < Number(scrollRounds || 80); round += 1) {
       roundsCompleted = round + 1;
       const before = videos.length;
-      videos = uniqByVideoId([...videos, ...(await collectVisibleVideoLinks(client))]).slice(0, limit);
+      videos = mergeObserved([...videos, ...(await collectVisibleVideoLinks(client))]);
       onProgress?.({ phase: 'list', round: round + 1, found: videos.length });
       if (videos.length >= limit) {
         stopReason = 'limit_reached';
         break;
       }
+      if (paginationObserved && hasMore === false) {
+        stopReason = 'cursor_exhausted';
+        break;
+      }
       await client.evaluate('window.scrollBy(0, Math.max(900, window.innerHeight * 0.85))');
       await sleep(1800);
+      await refreshStructured();
+      videos = mergeObserved(videos);
       if (videos.length === before) stableRounds += 1;
       else stableRounds = 0;
       if (stableRounds >= 6) {
@@ -177,19 +253,30 @@ export async function collectCreatorSnapshot({
     const enriched = [];
     for (let index = 0; index < videos.length; index += 1) {
       const video = videos[index];
-      const detail = await fetchStructuredVideoDetail(client, video.url, video);
-      enriched.push(detail.ok ? detail.item : { ...video, metadata_status: 'failed', metadata_error: detail.error });
-      onProgress?.({ phase: 'metadata', index: index + 1, total: videos.length, ok: detail.ok });
+      if (video.metadata_status === 'structured') {
+        enriched.push(video);
+        onProgress?.({ phase: 'metadata', index: index + 1, total: videos.length, ok: true });
+      } else {
+        const detail = await fetchStructuredVideoDetail(client, video.url, video);
+        enriched.push(detail.ok ? detail.item : { ...video, metadata_status: 'failed', metadata_error: detail.error });
+        onProgress?.({ phase: 'metadata', index: index + 1, total: videos.length, ok: detail.ok });
+      }
       if (index < videos.length - 1) await sleep(Math.max(0, Number(metadataDelayMs || 0)));
     }
+    const complete = stopReason === 'cursor_exhausted' && paginationObserved && hasMore === false;
     return {
       videos: enriched,
       listing: {
         observed_count: enriched.length,
         rounds_completed: roundsCompleted,
         stop_reason: stopReason,
-        complete: false,
-        completeness_note: 'DOM scrolling cannot prove creator-page exhaustion; treat this as observed_count, not an authoritative total.',
+        pagination_observed: paginationObserved,
+        has_more: hasMore,
+        cursor,
+        complete,
+        completeness_note: complete
+          ? 'Creator post pagination returned has_more=false without hitting the requested limit.'
+          : 'The run did not prove creator-page exhaustion; treat observed_count as non-authoritative.',
       },
     };
   } finally {
