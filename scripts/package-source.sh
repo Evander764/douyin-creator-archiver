@@ -6,8 +6,9 @@ version="$(node -p "require('$project_dir/package.json').version")"
 dist_dir="$project_dir/dist"
 stage_root="$(mktemp -d /tmp/dyca-package.XXXXXX)"
 stage_dir="$stage_root/douyin-creator-archiver-v$version"
-archive="$dist_dir/douyin-creator-archiver-v$version-source.zip"
-temp_archive="$stage_root/douyin-creator-archiver-v$version-source.zip"
+archive_name="douyin-creator-archiver-v$version-source.zip"
+archive="$dist_dir/$archive_name"
+temp_archive="$stage_root/$archive_name"
 
 cleanup() {
   rm -rf "$stage_root"
@@ -26,5 +27,5 @@ rsync -a \
 
 (cd "$stage_root" && /usr/bin/zip -qry "$temp_archive" "$(basename "$stage_dir")")
 mv "$temp_archive" "$archive"
-/usr/bin/shasum -a 256 "$archive" > "$archive.sha256"
+(cd "$dist_dir" && /usr/bin/shasum -a 256 "$archive_name" > "$archive_name.sha256")
 echo "$archive"
