@@ -17,7 +17,9 @@ import {
   processQualifiedItemTransaction,
 } from '../src/douyin.js';
 import { buildYtDlpAudioArgs, selectAudioOnlyFormat, validateAudioDuration, validateAudioOnlyProbe } from '../src/download.js';
-import { filterByMinimumLikes, filterByMinimumRedHearts, writeArchiveReport } from '../src/cli.js';
+import {
+  createQualifiedHookQueue, filterByMinimumLikes, filterByMinimumRedHearts, writeArchiveReport
+} from '../src/cli.js';
 
 test('parseDouyinVideoId supports video and modal urls', () => {
   assert.equal(parseDouyinVideoId('https://www.douyin.com/video/7611095597914918153'), '7611095597914918153');
@@ -218,6 +220,9 @@ test('qualified item transaction applies ingestion before browser back and verif
       if (expression.includes('ready: location.href.includes')) {
         return { href: `https://www.douyin.com/video/7611095597914918153`, ready: page === 'detail' };
       }
+      if (expression.includes('title: document.title')) {
+        return { href: 'https://www.douyin.com/video/7611095597914918153', title: 'detail' };
+      }
       if (expression.includes("const input =")) {
         return { href: 'https://www.douyin.com/search/%23创业', value: '#创业' };
       }
@@ -226,6 +231,16 @@ test('qualified item transaction applies ingestion before browser back and verif
         return undefined;
       }
       throw new Error(`Unexpected expression: ${expression}`);
+    },
+    async send(method) {
+      if (method === 'Target.createTarget') {
+        events.push('backup-tab');
+        return { targetId: 'backup-1' };
+      }
+      if (method === 'Page.getNavigationHistory') {
+        return { currentIndex: 0, entries: [{ id: 1, url: 'https://www.douyin.com/search/%23创业' }] };
+      }
+      throw new Error(`Unexpected CDP command: ${method}`);
     },
   };
   const result = await processQualifiedItemTransaction(client, {
@@ -239,7 +254,7 @@ test('qualified item transaction applies ingestion before browser back and verif
     },
   });
   assert.equal(result.processed, true);
-  assert.deepEqual(events, ['open', 'ingest', 'back', 'restore-scroll']);
+  assert.deepEqual(events, ['open', 'backup-tab', 'ingest', 'back', 'restore-scroll']);
 });
 
 test('qualified item transaction returns through browser history when a note adds a second detail entry', async () => {
@@ -260,6 +275,9 @@ test('qualified item transaction returns through browser history when a note add
       if (expression.includes('ready: location.href.includes')) {
         return { href: 'https://www.douyin.com/note/7611095597914918153', ready: page === 'detail' };
       }
+      if (expression.includes('title: document.title')) {
+        return { href: 'https://www.douyin.com/note/7611095597914918153', title: 'detail' };
+      }
       if (expression.includes("const input =")) {
         return page === 'search'
           ? { href: 'https://www.douyin.com/search/%23AI', value: '#AI' }
@@ -272,6 +290,10 @@ test('qualified item transaction returns through browser history when a note add
       throw new Error(`Unexpected expression: ${expression}`);
     },
     async send(method, params) {
+      if (method === 'Target.createTarget') {
+        events.push('backup-tab');
+        return { targetId: 'backup-note' };
+      }
       if (method === 'Page.getNavigationHistory') {
         return {
           currentIndex: 1,
@@ -300,7 +322,35 @@ test('qualified item transaction returns through browser history when a note add
     },
   });
   assert.equal(result.processed, true);
-  assert.deepEqual(events, ['open', 'ingest', 'back', 'history-entry-back', 'restore-scroll']);
+  assert.deepEqual(events, ['open', 'backup-tab', 'ingest', 'back', 'history-entry-back', 'restore-scroll']);
+});
+
+test('streaming hook queue starts work without blocking search and caps worker concurrency', async () => {
+  let active = 0;
+  let maxActive = 0;
+  const releases = [];
+  const queue = createQualifiedHookQueue({
+    script: '/tmp/hook.mjs', outDir: '/tmp/out', timeoutMs: 1000, concurrency: 2,
+    runHook: async (_script, item) => new Promise((resolve) => {
+      active += 1;
+      maxActive = Math.max(maxActive, active);
+      releases.push(() => {
+        active -= 1;
+        resolve({ item_id: item.id });
+      });
+    }),
+  });
+  const first = queue.enqueue({ id: '1' }, { backup_target_id: 'tab-1', port: 9533 });
+  const second = queue.enqueue({ id: '2' }, { backup_target_id: 'tab-2', port: 9533 });
+  const third = queue.enqueue({ id: '3' }, { backup_target_id: 'tab-3', port: 9533 });
+  assert.equal(first.queued && second.queued && third.queued, true);
+  assert.equal(maxActive, 2);
+  releases.shift()();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(maxActive, 2);
+  while (releases.length) releases.shift()();
+  const report = await queue.drain();
+  assert.deepEqual({ total: report.total, complete: report.complete, failed: report.failed }, { total: 3, complete: 3, failed: 0 });
 });
 
 test('yt-dlp audio args use the dedicated Chrome profile and selected audio-only format', () => {

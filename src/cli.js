@@ -32,7 +32,7 @@ function usage() {
 Usage:
   dyca doctor
   dyca login [--profile-dir PATH] [--port 9533]
-  dyca search-keywords --keywords-file FILE [--out DIR] [--target-per-keyword 1] [--max-scanned-per-keyword 200] [--min-red-hearts 1000] [--within-days 60] [--qualified-hook SCRIPT]
+  dyca search-keywords --keywords-file FILE [--out DIR] [--target-per-keyword 1] [--max-scanned-per-keyword 200] [--min-red-hearts 1000] [--within-days 60] [--qualified-hook SCRIPT] [--hook-concurrency 2]
   dyca list --creator-url URL [--out DIR] [--limit N] [--min-red-hearts 1000]
   dyca archive --creator-url URL [--out DIR] [--limit N] [--min-red-hearts 1000] [--mode audio|video|both] [--transcribe true --whisper-model PATH]
   dyca archive-urls --input ROWS.jsonl [--out DIR] [--limit N] [--min-red-hearts 1000] [--mode audio|video|both] [--transcribe true --whisper-model PATH]
@@ -472,6 +472,75 @@ async function runQualifiedHook(script, item, outDir, timeoutMs) {
   return receipt;
 }
 
+export function createQualifiedHookQueue({ script, outDir, timeoutMs, concurrency = 2, runHook = runQualifiedHook } = {}) {
+  const limit = positiveInteger(concurrency, 2, '--hook-concurrency', 8);
+  const waiting = [];
+  const jobs = [];
+  let active = 0;
+  const pump = () => {
+    while (active < limit && waiting.length) {
+      const job = waiting.shift();
+      active += 1;
+      job.status = 'running';
+      console.error(`worker ${job.item.id}: start`);
+      runHook(script, job.item, outDir, timeoutMs)
+        .then((receipt) => {
+          job.status = 'complete';
+          job.receipt = receipt;
+          console.error(`worker ${job.item.id}: complete`);
+          job.resolve(receipt);
+        })
+        .catch((error) => {
+          job.status = 'failed';
+          job.error = error.message;
+          console.error(`worker ${job.item.id}: failed: ${error.message}`);
+          job.reject(error);
+        })
+        .finally(() => {
+          active -= 1;
+          pump();
+        });
+    }
+  };
+  return {
+    enqueue(item, context = {}) {
+      const enriched = {
+        ...item,
+        pipeline: {
+          mode: 'streaming_parallel',
+          backup_target_id: context.backup_target_id,
+          backup_url: context.backup_url,
+          cdp_port: context.port,
+          queued_at: new Date().toISOString(),
+        },
+      };
+      const job = { item: enriched, status: 'queued', receipt: null, error: null };
+      job.promise = new Promise((resolve, reject) => Object.assign(job, { resolve, reject }));
+      job.promise.catch(() => {});
+      jobs.push(job);
+      waiting.push(job);
+      pump();
+      return {
+        queued: true,
+        item_id: String(item.id || ''),
+        backup_target_id: context.backup_target_id,
+        queue_position: waiting.length,
+      };
+    },
+    async drain() {
+      const settled = await Promise.allSettled(jobs.map((job) => job.promise));
+      return {
+        total: jobs.length,
+        complete: settled.filter((item) => item.status === 'fulfilled').length,
+        failed: settled.filter((item) => item.status === 'rejected').length,
+        jobs: jobs.map(({ item, status, receipt, error }) => ({
+          item_id: String(item.id || ''), status, error, receipt,
+        })),
+      };
+    },
+  };
+}
+
 function writeKeywordSearchResults(outDir, result, runStatus = 'complete') {
   ensureDir(outDir);
   ensureDir(join(outDir, 'logs'));
@@ -502,6 +571,12 @@ async function commandSearchKeywords(args) {
   const resumeItem = args['resume-item-json']
     ? JSON.parse(readFileSync(resolve(String(args['resume-item-json'])), 'utf8'))
     : null;
+  const hookQueue = qualifiedHook ? createQualifiedHookQueue({
+    script: qualifiedHook,
+    outDir,
+    timeoutMs: Math.max(60_000, Number(args['qualified-hook-timeout-ms'] || 30 * 60 * 1000)),
+    concurrency: positiveInteger(args['hook-concurrency'], 2, '--hook-concurrency', 8),
+  }) : null;
   const result = await collectKeywordSearchBatch({
     keywords,
     targetPerKeyword: positiveInteger(args['target-per-keyword'], 1, '--target-per-keyword', 100),
@@ -514,18 +589,16 @@ async function commandSearchKeywords(args) {
     ...options,
     onProgress: logKeywordProgress,
     onCheckpoint: (checkpoint) => writeKeywordSearchResults(outDir, checkpoint, 'in_progress'),
-    onQualified: qualifiedHook
-      ? (item) => runQualifiedHook(
-        qualifiedHook,
-        item,
-        outDir,
-        Math.max(60_000, Number(args['qualified-hook-timeout-ms'] || 30 * 60 * 1000)),
-      )
+    onQualified: hookQueue
+      ? (item, context) => hookQueue.enqueue(item, { ...context, port: options.port })
       : null,
     resumeCurrent: parseBool(args['resume-current'], false),
     seedQualifiedItems: resumeItem ? [resumeItem] : [],
   });
-  const report = writeKeywordSearchResults(outDir, result);
+  const pipeline = hookQueue ? await hookQueue.drain() : { total: 0, complete: 0, failed: 0, jobs: [] };
+  writeFileSync(join(outDir, 'pipeline-report.json'), `${JSON.stringify(pipeline, null, 2)}\n`);
+  const report = writeKeywordSearchResults(outDir, result, pipeline.failed ? 'partial_failure' : 'complete');
+  if (pipeline.failed) throw new Error(`Streaming pipeline completed with ${pipeline.failed} failed worker(s)`);
   console.log(JSON.stringify({ ok: true, outDir, ...report }, null, 2));
 }
 

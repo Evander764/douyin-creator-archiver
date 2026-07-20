@@ -12,7 +12,7 @@ Use this skill when the user needs keyword search, video metadata, audio, or voi
 - Only process content the user owns, is authorized to archive, or may lawfully process.
 - Do not bypass CAPTCHA, paywalls, DRM, login challenges, or platform restrictions.
 - Keep cookies and browser profiles local. Never print cookie values.
-- Default to serial, stable runs. Do not parallelize Douyin page control unless the user explicitly accepts the reliability risk.
+- Keep visible Douyin search-page control serial and stable. When the user requests streaming throughput, parallelize only the background item workers; never let multiple workers type or click in the search page.
 
 ## Required Local Tool
 
@@ -50,7 +50,7 @@ dyca search-keywords --keywords-file ./presets/business-keywords.txt --out ./dou
 
 The command must reuse one Douyin window, select and delete the previous query, verify the box is empty, type `#keyword`, and click the visible search button. It must not construct a search-result URL. Qualify only `statistics.digg_count > 1000` plus publication inside the rolling 60-day window. Switch after the first qualified row or 200 scanned rows. Keep the Douyin page open to preserve the session, disconnect control on exit, and restore the previously frontmost application.
 
-When the workflow requires immediate ingestion, pass `--qualified-hook <absolute-script.mjs>`. The hook must finish and verify one item before the browser goes Back to the same search result and continues. Stop on hook or Back failure. Never submit the current keyword again after an item has been ingested.
+When the workflow requires streaming ingestion, pass `--qualified-hook <absolute-script.mjs>` and optionally `--hook-concurrency 2`. For every qualified item, duplicate the detail into a background backup tab, queue the worker, return the original tab to the exact captured search-history entry, verify the query and continue searching immediately. Search-page control remains serial; only background workers run concurrently. Back failure stops search. Worker failures are collected in `pipeline-report.json` and make the final run `partial_failure`; they do not silently stop the search lane. Never submit the current keyword again after an item has been queued.
 
 4. List creator videos first:
 

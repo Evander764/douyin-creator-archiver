@@ -85,7 +85,7 @@ dyca search-keywords \
 
 The browser types `#` before each keyword, clicks the visible search button, and processes keywords serially in one reused Douyin window. Before the next keyword it selects and deletes the old query, verifies that the input is empty, and then types the new query. A video qualifies only when the title or description deterministically matches the keyword, structured `statistics.digg_count` is strictly greater than 1000, and `create_time` falls inside the rolling 60-day window. ASCII keywords such as `AI` use alphanumeric word boundaries so text such as `haerin` is not a match; Chinese keywords use exact normalized substring matching. Exact 1000, irrelevant results, missing metrics, and missing publication times are excluded. The tool keeps the Douyin window open to preserve the session and restores the application that was in front before the run.
 
-For item-at-a-time ingestion, pass `--qualified-hook /absolute/path/to/hook.mjs`. Each newly qualified video is opened in the same tab, written to `transactions/<video_id>/qualified-item.json`, and passed to the hook as `--item-json ... --transaction-dir ...`. Only a zero-exit hook is treated as a confirmed ingest. The browser then returns through browser history to the exact original `#keyword` result entry, verifies the search value and restores its scroll position before scanning continues. This also handles note posts that add a second detail-history entry. Hook failure or Back verification failure stops the run; `--resume-current true` has one attempt and never submits the same keyword again.
+For streaming ingestion, pass `--qualified-hook /absolute/path/to/hook.mjs` and optionally `--hook-concurrency 2`. Each newly qualified video is opened in the original tab, duplicated into a background backup tab, queued as `transactions/<video_id>/qualified-item.json`, and then the original tab immediately returns through browser history to the exact `#keyword` result entry. Search continues while up to two hook workers download, extract, transcribe and ingest in parallel. Note posts that add a second detail-history entry return to the captured search-history entry without submitting the keyword again. At the end the CLI waits for all workers and writes `pipeline-report.json`; any worker failure makes the final run `partial_failure` instead of hiding it.
 
 Outputs:
 
@@ -144,7 +144,7 @@ douyin-archive/
 ```bash
 dyca doctor
 dyca login [--profile-dir PATH] [--port 9533]
-dyca search-keywords --keywords-file FILE [--out DIR] [--target-per-keyword 1] [--max-scanned-per-keyword 200] [--min-red-hearts 1000] [--within-days 60] [--qualified-hook SCRIPT]
+dyca search-keywords --keywords-file FILE [--out DIR] [--target-per-keyword 1] [--max-scanned-per-keyword 200] [--min-red-hearts 1000] [--within-days 60] [--qualified-hook SCRIPT] [--hook-concurrency 2]
 dyca list --creator-url URL [--out DIR] [--limit N] [--min-red-hearts N] [--scroll-rounds N]
 dyca archive --creator-url URL [--out DIR] [--limit N] [--min-red-hearts N] [--mode audio|video|both]
 dyca archive-urls --input ROWS.jsonl [--out DIR] [--limit N] [--min-red-hearts N] [--mode audio|video|both]

@@ -142,6 +142,20 @@ async function backToSearchResults(client, origin) {
   throw new Error(`Douyin browser back failed; current page: ${last?.href || 'unknown'}`);
 }
 
+async function duplicateQualifiedDetail(client, origin) {
+  if (typeof client.send !== 'function') throw new Error('Douyin backup-tab creation requires CDP Target.createTarget');
+  const current = await client.evaluate('({ href: location.href, title: document.title })');
+  if (!current?.href || !String(current.href).includes(String(origin.item_id))) {
+    throw new Error('Douyin backup-tab creation refused: detail page identity mismatch');
+  }
+  const created = await client.send('Target.createTarget', {
+    url: current.href,
+    background: true,
+  });
+  if (!created?.targetId) throw new Error('Douyin backup-tab creation failed');
+  return { backup_target_id: created.targetId, backup_url: current.href };
+}
+
 async function currentSearchMatches(client, searchQuery) {
   const state = await client.evaluate(`(() => {
     const input = [...document.querySelectorAll('input')]
@@ -164,9 +178,10 @@ export async function processQualifiedItemTransaction(client, item, {
 } = {}) {
   if (typeof onQualified !== 'function') return { processed: false };
   const origin = await openQualifiedVideo(client, item, searchQuery);
-  const receipt = await onQualified(item, { ...origin, phase: 'detail_open' });
+  const backup = await duplicateQualifiedDetail(client, origin);
+  const receipt = await onQualified(item, { ...origin, ...backup, phase: 'queued_with_backup' });
   await backToSearchResults(client, origin);
-  return { processed: true, receipt };
+  return { processed: true, receipt, backup };
 }
 
 export function parseLengthPrefixedJsonStream(input = '') {
