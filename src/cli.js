@@ -16,7 +16,7 @@ import {
 } from './utils.js';
 import { launchChrome } from './cdp.js';
 import { collectCreatorSnapshot, parseDouyinVideoId, resolveVideoMedia } from './douyin.js';
-import { curlDownload, downloadAudioWithYtDlp, extractAudio } from './download.js';
+import { curlDownload, downloadAudioWithYtDlp, downloadMusicPlayUrl, extractAudio } from './download.js';
 import { transcribeAudio } from './transcribe.js';
 
 const execFileAsync = promisify(execFile);
@@ -213,7 +213,6 @@ async function commandArchive(args) {
     whisperModelPath: String(args['whisper-model'] || process.env.DYCA_WHISPER_MODEL || ''),
     whisperCliPath: String(args['whisper-cli'] || '/opt/homebrew/bin/whisper-cli'),
     ytDlpPath: String(args['yt-dlp-path'] || process.env.DYCA_YT_DLP || 'yt-dlp'),
-    allowMuxedAudio: parseBool(args['allow-muxed-audio'], false),
   });
   console.log(JSON.stringify({ ok: report.ok, total: report.total, succeeded: report.succeeded, failed: report.failed, outDir }, null, 2));
 }
@@ -236,7 +235,6 @@ export async function archiveVideoRows({
   whisperModelPath = '',
   whisperCliPath = '/opt/homebrew/bin/whisper-cli',
   ytDlpPath = 'yt-dlp',
-  allowMuxedAudio = false,
 }) {
   if (transcribe && mode === 'video') throw new Error('--transcribe requires --mode audio or --mode both');
   ensureDir(options.profileDir);
@@ -278,36 +276,44 @@ export async function archiveVideoRows({
       console.error(`archive-url ${index + 1}/${videos.length}: ${item.title || item.url}`);
       if (mode === 'audio') {
         try {
-          const audio = await downloadAudioWithYtDlp(item.url, audioPath, {
-            profileDir: options.profileDir,
-            ytDlpPath,
-          });
-          mediaOk = true;
-          result.mediaSource = 'yt-dlp-audio';
-          result.audioBytes = audio.bytes;
-        } catch (ytDlpError) {
-          result.ytDlpError = ytDlpError.message;
-          if (!allowMuxedAudio) throw ytDlpError;
-          const resolved = item.download_url
-            ? {
-              mediaUrl: item.download_url,
-              headers: { referer: 'https://www.douyin.com/' },
-              source: 'structured-download',
-            }
-            : await resolveVideoMedia({ videoUrl: item.url, ...options });
-          let downloaded;
           let audio;
-          try {
-            downloaded = await curlDownload(resolved.mediaUrl, tempVideoPath, { headers: resolved.headers });
-            audio = await extractAudio(tempVideoPath, audioPath);
-          } finally {
-            rmSync(tempVideoPath, { force: true });
-            rmSync(`${tempVideoPath}.partial`, { force: true });
+          if (item.audio_url) {
+            try {
+              audio = await downloadMusicPlayUrl(item.audio_url, audioPath, {
+                expectedDurationSeconds: Number(item.duration_ms) > 0
+                  ? Number(item.duration_ms) / 1000
+                  : item.music_duration_seconds,
+              });
+              result.mediaSource = 'music.play_url';
+              result.sourceAudioBytes = audio.sourceBytes;
+              result.audioProbe = audio.probe;
+            } catch (musicPlayUrlError) {
+              result.musicPlayUrlError = musicPlayUrlError.message;
+              audio = await downloadAudioWithYtDlp(item.url, audioPath, {
+                profileDir: options.profileDir,
+                ytDlpPath,
+                expectedDurationSeconds: Number(item.duration_ms) > 0
+                  ? Number(item.duration_ms) / 1000
+                  : item.music_duration_seconds,
+              });
+              result.mediaSource = 'yt-dlp-audio';
+            }
+          } else {
+            audio = await downloadAudioWithYtDlp(item.url, audioPath, {
+              profileDir: options.profileDir,
+              ytDlpPath,
+              expectedDurationSeconds: Number(item.duration_ms) > 0
+                ? Number(item.duration_ms) / 1000
+                : item.music_duration_seconds,
+            });
+            result.mediaSource = 'yt-dlp-audio';
           }
           mediaOk = true;
-          result.mediaSource = resolved.source;
-          result.downloadedBytes = downloaded.bytes;
           result.audioBytes = audio.bytes;
+          if (audio.probe) result.audioProbe = audio.probe;
+        } catch (audioOnlyError) {
+          result.audioOnlyError = audioOnlyError.message;
+          throw audioOnlyError;
         }
       } else {
         const resolved = item.download_url
@@ -397,7 +403,6 @@ async function commandArchiveUrls(args) {
     whisperModelPath: String(args['whisper-model'] || process.env.DYCA_WHISPER_MODEL || ''),
     whisperCliPath: String(args['whisper-cli'] || '/opt/homebrew/bin/whisper-cli'),
     ytDlpPath: String(args['yt-dlp-path'] || process.env.DYCA_YT_DLP || 'yt-dlp'),
-    allowMuxedAudio: parseBool(args['allow-muxed-audio'], false),
   });
   console.log(JSON.stringify({ ok: report.ok, total: report.total, succeeded: report.succeeded, failed: report.failed, outDir }, null, 2));
 }

@@ -57,6 +57,82 @@ export async function extractAudio(videoPath, audioPath, { ffmpegPath = '/opt/ho
   return { ok: true, path: audioPath, bytes: statSync(audioPath).size };
 }
 
+export function validateAudioOnlyProbe(value = {}) {
+  const payload = typeof value === 'string' ? JSON.parse(value) : value;
+  const streams = Array.isArray(payload?.streams) ? payload.streams : [];
+  const audioStreams = streams.filter((stream) => stream?.codec_type === 'audio');
+  const videoStreams = streams.filter((stream) => stream?.codec_type === 'video');
+  if (!audioStreams.length || videoStreams.length) {
+    throw new Error(`audio_only_validation_failed: audio_streams=${audioStreams.length} video_streams=${videoStreams.length}`);
+  }
+  const durationSeconds = Number(payload?.format?.duration);
+  return {
+    audio_streams: audioStreams.length,
+    video_streams: 0,
+    duration_seconds: Number.isFinite(durationSeconds) && durationSeconds > 0 ? durationSeconds : null,
+  };
+}
+
+export function validateAudioDuration(actualSeconds, expectedSeconds, toleranceSeconds = 3) {
+  const actual = Number(actualSeconds);
+  const expected = Number(expectedSeconds);
+  const tolerance = Math.max(0, Number(toleranceSeconds) || 0);
+  if (!Number.isFinite(expected) || expected <= 0) return { checked: false, difference_seconds: null };
+  if (!Number.isFinite(actual) || actual <= 0) {
+    throw new Error(`audio_duration_missing: expected=${expected.toFixed(3)}`);
+  }
+  const difference = Math.abs(actual - expected);
+  if (difference > tolerance) {
+    throw new Error(`audio_duration_mismatch: expected=${expected.toFixed(3)} actual=${actual.toFixed(3)} tolerance=${tolerance.toFixed(3)}`);
+  }
+  return { checked: true, difference_seconds: difference };
+}
+
+export async function downloadMusicPlayUrl(audioUrl, audioPath, {
+  headers = { referer: 'https://www.douyin.com/' },
+  ffmpegPath = '/opt/homebrew/bin/ffmpeg',
+  ffprobePath = '/opt/homebrew/bin/ffprobe',
+  expectedDurationSeconds = null,
+  durationToleranceSeconds = 3,
+  timeoutMs = 20 * 60 * 1000,
+} = {}) {
+  if (!/^https?:\/\//i.test(String(audioUrl || ''))) throw new Error('music.play_url is missing or invalid');
+  ensureDir(dirname(audioPath));
+  const sourcePath = `${audioPath}.music-source`;
+  rmSync(audioPath, { force: true });
+  rmSync(sourcePath, { force: true });
+  rmSync(`${sourcePath}.partial`, { force: true });
+  try {
+    const downloaded = await curlDownload(audioUrl, sourcePath, { headers, timeoutMs });
+    const inspected = await execFileAsync(ffprobePath, [
+      '-v', 'error',
+      '-show_entries', 'stream=codec_type,codec_name:format=duration',
+      '-of', 'json',
+      sourcePath,
+    ], { encoding: 'utf8', timeout: Math.min(timeoutMs, 60_000), maxBuffer: 1024 * 1024 });
+    const probe = validateAudioOnlyProbe(inspected.stdout);
+    probe.duration_validation = validateAudioDuration(
+      probe.duration_seconds,
+      expectedDurationSeconds,
+      durationToleranceSeconds,
+    );
+    await execFileAsync(ffmpegPath, [
+      '-y',
+      '-i', sourcePath,
+      '-map', '0:a:0',
+      '-vn',
+      '-c:a', 'aac',
+      '-b:a', '128k',
+      audioPath,
+    ], { encoding: 'utf8', timeout: timeoutMs, maxBuffer: 1024 * 1024 });
+    if (!existsSync(audioPath)) throw new Error('ffmpeg did not generate the expected m4a output from music.play_url.');
+    return { ok: true, path: audioPath, bytes: statSync(audioPath).size, sourceBytes: downloaded.bytes, probe };
+  } finally {
+    rmSync(sourcePath, { force: true });
+    rmSync(`${sourcePath}.partial`, { force: true });
+  }
+}
+
 export function buildYtDlpAudioArgs(videoUrl, audioPath, profileDir, formatId) {
   const outputTemplate = String(audioPath).replace(/\.m4a$/i, '.%(ext)s');
   return [
@@ -82,6 +158,8 @@ export function selectAudioOnlyFormat(formats = []) {
 export async function downloadAudioWithYtDlp(videoUrl, audioPath, {
   profileDir,
   ytDlpPath = 'yt-dlp',
+  ffprobePath = '/opt/homebrew/bin/ffprobe',
+  expectedDurationSeconds = null,
   timeoutMs = 20 * 60 * 1000,
 } = {}) {
   ensureDir(dirname(audioPath));
@@ -102,6 +180,11 @@ export async function downloadAudioWithYtDlp(videoUrl, audioPath, {
     maxBuffer: 32 * 1024 * 1024,
   });
   const metadata = JSON.parse(inspected.stdout);
+  const expectedId = String(videoUrl || '').match(/\/video\/(\d{6,})/)?.[1] || '';
+  if (expectedId && metadata.id && expectedId !== String(metadata.id)) {
+    throw new Error(`audio_target_mismatch: expected=${expectedId} actual=${metadata.id}`);
+  }
+  validateAudioDuration(metadata.duration, expectedDurationSeconds, 3);
   const audioOnly = selectAudioOnlyFormat(metadata.formats || []);
   if (!audioOnly) throw new Error('audio_only_unavailable: Douyin did not expose a genuine audio-only format.');
   await execFileAsync(ytDlpPath, buildYtDlpAudioArgs(videoUrl, audioPath, profileDir, audioOnly.format_id), {
@@ -110,5 +193,18 @@ export async function downloadAudioWithYtDlp(videoUrl, audioPath, {
     maxBuffer: 8 * 1024 * 1024,
   });
   if (!existsSync(audioPath)) throw new Error('yt-dlp did not generate the expected m4a output.');
-  return { ok: true, path: audioPath, bytes: statSync(audioPath).size };
+  try {
+    const outputProbe = await execFileAsync(ffprobePath, [
+      '-v', 'error',
+      '-show_entries', 'stream=codec_type,codec_name:format=duration',
+      '-of', 'json',
+      audioPath,
+    ], { encoding: 'utf8', timeout: Math.min(timeoutMs, 60_000), maxBuffer: 1024 * 1024 });
+    const probe = validateAudioOnlyProbe(outputProbe.stdout);
+    probe.duration_validation = validateAudioDuration(probe.duration_seconds, expectedDurationSeconds, 3);
+    return { ok: true, path: audioPath, bytes: statSync(audioPath).size, probe };
+  } catch (error) {
+    rmSync(audioPath, { force: true });
+    throw error;
+  }
 }

@@ -35,9 +35,11 @@ function epochToISO(value) {
 export function normalizeStructuredVideo(aweme = {}, defaults = {}) {
   const statistics = aweme.statistics || {};
   const video = aweme.video || {};
+  const music = aweme.music || {};
   const author = aweme.author || {};
   const id = String(aweme.aweme_id || aweme.awemeId || parseDouyinVideoId(defaults.url) || '');
   const title = compact(aweme.desc || aweme.item_title || defaults.title);
+  const audioUrl = firstUrl(music.play_url);
   return {
     ...defaults,
     id,
@@ -51,6 +53,9 @@ export function normalizeStructuredVideo(aweme = {}, defaults = {}) {
     comment_count: statistics.comment_count ?? null,
     share_count: statistics.share_count ?? null,
     cover_url: firstUrl(video.origin_cover, video.raw_cover, video.cover, video.dynamic_cover),
+    audio_url: audioUrl,
+    audio_source: audioUrl ? 'music.play_url' : null,
+    music_duration_seconds: Number(music.duration || 0) || null,
     download_url: firstUrl(video.download_addr),
     duration_ms: Number(video.duration || aweme.duration || 0) || null,
     metadata_status: 'structured',

@@ -25,7 +25,7 @@ Use this only for content you own, are authorized to archive, or may lawfully pr
 - Node.js 22.5 or newer.
 - `ffmpeg` for audio extraction.
 - `curl`, included with macOS.
-- `yt-dlp` is recommended for `--mode audio`. The CLI first inspects formats and downloads only a genuine audio-only stream. When Douyin exposes only muxed video + audio, the default result is `audio_only_unavailable`; it does not silently spend bandwidth on video.
+- `--mode audio` first uses the structured `music.play_url` stream. The downloaded source is checked with `ffprobe` and accepted only when it contains audio, has no video stream, and matches the target video's duration within 3 seconds. If `music.play_url` is absent or invalid, `yt-dlp` may be used only after it identifies a genuine audio-only format. Muxed video + audio is always rejected.
 
 Optional bootstrap check:
 
@@ -134,7 +134,7 @@ Important options:
 - `--transcribe true`: generate voice transcripts with local `whisper-cli`.
 - `--whisper-model PATH`: absolute path to a whisper.cpp model. Can also use `DYCA_WHISPER_MODEL`.
 - `--yt-dlp-path PATH`: optional explicit `yt-dlp` binary path for reliable audio-only extraction. Can also use `DYCA_YT_DLP`.
-- `--allow-muxed-audio true`: explicit opt-in to the legacy fallback that may temporarily download video before extracting audio. Do not use this when visual downloads are excluded.
+- Audio mode never falls back to a muxed video stream. `music.play_url` and any fallback must pass a zero-video `ffprobe` gate; `music.play_url` must also match the target video's duration within 3 seconds.
 
 Each `creator-videos.jsonl` row can include:
 
@@ -148,6 +148,8 @@ Each `creator-videos.jsonl` row can include:
   "comment_count": 11,
   "share_count": 122,
   "cover_url": "...",
+  "audio_url": "...",
+  "audio_source": "music.play_url",
   "download_url": "...",
   "metadata_status": "structured"
 }

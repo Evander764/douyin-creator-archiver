@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parseArgs, sanitizeSegment } from '../src/utils.js';
 import { normalizeStructuredVideo, normalizeVideoUrl, parseCreatorPostPayload, parseDouyinVideoId } from '../src/douyin.js';
-import { buildYtDlpAudioArgs, selectAudioOnlyFormat } from '../src/download.js';
+import { buildYtDlpAudioArgs, selectAudioOnlyFormat, validateAudioDuration, validateAudioOnlyProbe } from '../src/download.js';
 import { filterByMinimumLikes, writeArchiveReport } from '../src/cli.js';
 
 test('parseDouyinVideoId supports video and modal urls', () => {
@@ -27,7 +27,7 @@ test('sanitizeSegment creates filesystem-safe names', () => {
   assert.equal(sanitizeSegment(''), 'item');
 });
 
-test('normalizeStructuredVideo keeps engagement metrics and cover', () => {
+test('normalizeStructuredVideo keeps metrics and exposes music.play_url as pure audio', () => {
   const item = normalizeStructuredVideo({
     aweme_id: '7611095597914918153',
     desc: '测试标题',
@@ -38,14 +38,33 @@ test('normalizeStructuredVideo keeps engagement metrics and cover', () => {
       origin_cover: { url_list: ['https://img.example/cover.jpg'] },
       download_addr: { url_list: ['https://media.example/video.mp4'] },
     },
+    music: { duration: 31, play_url: { url_list: ['https://audio.example/original-sound.m4a'] } },
   });
   assert.equal(item.like_count, 13);
   assert.equal(item.favorite_count, 3);
   assert.equal(item.comment_count, 1);
   assert.equal(item.share_count, 2);
   assert.equal(item.cover_url, 'https://img.example/cover.jpg');
+  assert.equal(item.audio_url, 'https://audio.example/original-sound.m4a');
+  assert.equal(item.audio_source, 'music.play_url');
+  assert.equal(item.music_duration_seconds, 31);
   assert.equal(item.download_url, 'https://media.example/video.mp4');
   assert.equal(item.duration_ms, 30861);
+});
+
+test('audio probe accepts pure audio, records duration, and rejects any video stream', () => {
+  assert.deepEqual(validateAudioOnlyProbe({ streams: [{ codec_type: 'audio', codec_name: 'aac' }], format: { duration: '30.861' } }), {
+    audio_streams: 1,
+    video_streams: 0,
+    duration_seconds: 30.861,
+  });
+  assert.throws(
+    () => validateAudioOnlyProbe({ streams: [{ codec_type: 'audio' }, { codec_type: 'video' }] }),
+    /audio_only_validation_failed/,
+  );
+  assert.throws(() => validateAudioOnlyProbe({ streams: [] }), /audio_only_validation_failed/);
+  assert.equal(validateAudioDuration(30.861, 30.5, 3).checked, true);
+  assert.throws(() => validateAudioDuration(914.73, 289.734, 3), /audio_duration_mismatch/);
 });
 
 test('writeArchiveReport persists final failed state', () => {
