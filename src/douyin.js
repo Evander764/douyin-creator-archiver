@@ -251,7 +251,7 @@ export function keywordSearchAttemptLimit(resumeCurrent = false) {
 export function applyKeywordSearchStandard(items = [], {
   keyword = '',
   minRedHearts = 1000,
-  withinDays = 14,
+  withinDays = 60,
   target = 1,
   maxScanned = 200,
   capturedAt = new Date().toISOString(),
@@ -620,7 +620,7 @@ export async function collectKeywordSearchBatch({
   targetPerKeyword = 1,
   maxScannedPerKeyword = 200,
   minRedHearts = 1000,
-  withinDays = 14,
+  withinDays = 60,
   maxScrollRounds = 80,
   scrollDelayMs = 2500,
   responseWaitMs = 15000,

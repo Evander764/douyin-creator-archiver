@@ -32,7 +32,7 @@ function usage() {
 Usage:
   dyca doctor
   dyca login [--profile-dir PATH] [--port 9533]
-  dyca search-keywords --keywords-file FILE [--out DIR] [--target-per-keyword 1] [--max-scanned-per-keyword 200] [--min-red-hearts 1000] [--within-days 14] [--qualified-hook SCRIPT]
+  dyca search-keywords --keywords-file FILE [--out DIR] [--target-per-keyword 1] [--max-scanned-per-keyword 200] [--min-red-hearts 1000] [--within-days 60] [--qualified-hook SCRIPT]
   dyca list --creator-url URL [--out DIR] [--limit N] [--min-red-hearts 1000]
   dyca archive --creator-url URL [--out DIR] [--limit N] [--min-red-hearts 1000] [--mode audio|video|both] [--transcribe true --whisper-model PATH]
   dyca archive-urls --input ROWS.jsonl [--out DIR] [--limit N] [--min-red-hearts 1000] [--mode audio|video|both] [--transcribe true --whisper-model PATH]
@@ -507,7 +507,7 @@ async function commandSearchKeywords(args) {
     targetPerKeyword: positiveInteger(args['target-per-keyword'], 1, '--target-per-keyword', 100),
     maxScannedPerKeyword: positiveInteger(args['max-scanned-per-keyword'], 200, '--max-scanned-per-keyword', 5000),
     minRedHearts: minimumRedHearts(args),
-    withinDays: positiveInteger(args['within-days'], 14, '--within-days', 3650),
+    withinDays: positiveInteger(args['within-days'], 60, '--within-days', 3650),
     maxScrollRounds: positiveInteger(args['max-scroll-rounds'], 80, '--max-scroll-rounds', 500),
     scrollDelayMs: Math.max(500, Number(args['scroll-delay-ms'] || 2500)),
     responseWaitMs: Math.max(3000, Number(args['response-wait-ms'] || 15000)),

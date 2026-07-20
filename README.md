@@ -10,7 +10,7 @@ It provides:
 - Creator-page video discovery.
 - Keyword search through the visible Douyin search box and search button, never by guessing a search URL.
 - Per-video structured metadata including `statistics.digg_count` as `red_heart_count`.
-- Keyword rules: `red_heart_count > 1000`, publication within 14 days, 1 qualified row per keyword, or switch after scanning 200 rows.
+- Keyword rules: `red_heart_count > 1000`, publication within 60 days, 1 qualified row per keyword, or switch after scanning 200 rows.
 - Known video URL archiving for upstream ingest queues.
 - Cover download, video download, and optional audio extraction.
 - Optional local Whisper voice transcription.
@@ -80,10 +80,10 @@ dyca search-keywords \
   --target-per-keyword 1 \
   --max-scanned-per-keyword 200 \
   --min-red-hearts 1000 \
-  --within-days 14
+  --within-days 60
 ```
 
-The browser types `#` before each keyword, clicks the visible search button, and processes keywords serially in one reused Douyin window. Before the next keyword it selects and deletes the old query, verifies that the input is empty, and then types the new query. A video qualifies only when the title or description deterministically matches the keyword, structured `statistics.digg_count` is strictly greater than 1000, and `create_time` falls inside the rolling 14-day window. ASCII keywords such as `AI` use alphanumeric word boundaries so text such as `haerin` is not a match; Chinese keywords use exact normalized substring matching. Exact 1000, irrelevant results, missing metrics, and missing publication times are excluded. The tool keeps the Douyin window open to preserve the session and restores the application that was in front before the run.
+The browser types `#` before each keyword, clicks the visible search button, and processes keywords serially in one reused Douyin window. Before the next keyword it selects and deletes the old query, verifies that the input is empty, and then types the new query. A video qualifies only when the title or description deterministically matches the keyword, structured `statistics.digg_count` is strictly greater than 1000, and `create_time` falls inside the rolling 60-day window. ASCII keywords such as `AI` use alphanumeric word boundaries so text such as `haerin` is not a match; Chinese keywords use exact normalized substring matching. Exact 1000, irrelevant results, missing metrics, and missing publication times are excluded. The tool keeps the Douyin window open to preserve the session and restores the application that was in front before the run.
 
 For item-at-a-time ingestion, pass `--qualified-hook /absolute/path/to/hook.mjs`. Each newly qualified video is opened in the same tab, written to `transactions/<video_id>/qualified-item.json`, and passed to the hook as `--item-json ... --transaction-dir ...`. Only a zero-exit hook is treated as a confirmed ingest. The browser then returns through browser history to the exact original `#keyword` result entry, verifies the search value and restores its scroll position before scanning continues. This also handles note posts that add a second detail-history entry. Hook failure or Back verification failure stops the run; `--resume-current true` has one attempt and never submits the same keyword again.
 
@@ -144,7 +144,7 @@ douyin-archive/
 ```bash
 dyca doctor
 dyca login [--profile-dir PATH] [--port 9533]
-dyca search-keywords --keywords-file FILE [--out DIR] [--target-per-keyword 1] [--max-scanned-per-keyword 200] [--min-red-hearts 1000] [--within-days 14] [--qualified-hook SCRIPT]
+dyca search-keywords --keywords-file FILE [--out DIR] [--target-per-keyword 1] [--max-scanned-per-keyword 200] [--min-red-hearts 1000] [--within-days 60] [--qualified-hook SCRIPT]
 dyca list --creator-url URL [--out DIR] [--limit N] [--min-red-hearts N] [--scroll-rounds N]
 dyca archive --creator-url URL [--out DIR] [--limit N] [--min-red-hearts N] [--mode audio|video|both]
 dyca archive-urls --input ROWS.jsonl [--out DIR] [--limit N] [--min-red-hearts N] [--mode audio|video|both]
