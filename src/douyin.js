@@ -76,16 +76,20 @@ export function normalizeStructuredVideo(aweme = {}, defaults = {}) {
 async function openQualifiedVideo(client, item, searchQuery) {
   const id = String(item.id || parseDouyinVideoId(item.url) || '');
   if (!id) throw new Error('Qualified item is missing a Douyin video id');
+  const detailUrl = normalizeVideoUrl(item.url || `https://www.douyin.com/video/${id}`);
   const origin = await client.evaluate(`(() => {
     const root = document.scrollingElement || document.documentElement;
     const anchor = [...document.querySelectorAll('a[href*="/video/"]')]
       .find((node) => String(node.href || '').includes('/video/' + ${JSON.stringify(id)}));
-    if (!anchor) return { ok: false, reason: 'qualified_card_not_found', href: location.href };
-    anchor.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'instant' });
     const before = { href: location.href, scroll_top: root.scrollTop };
+    if (!anchor) {
+      setTimeout(() => location.assign(${JSON.stringify(detailUrl)}), 0);
+      return { ok: true, opened_by: 'same_tab_structured_result_url', ...before };
+    }
+    anchor.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'instant' });
     anchor.removeAttribute('target');
     anchor.click();
-    return { ok: true, ...before };
+    return { ok: true, opened_by: 'visible_result_card', ...before };
   })()`);
   if (!origin?.ok) throw new Error(`Douyin qualified-item open failed: ${origin?.reason || 'unknown'}`);
   const deadline = Date.now() + 30000;
