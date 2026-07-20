@@ -222,7 +222,7 @@ export function applyKeywordSearchStandard(items = [], {
   keyword = '',
   minRedHearts = 1000,
   withinDays = 14,
-  target = 10,
+  target = 3,
   maxScanned = 200,
   capturedAt = new Date().toISOString(),
 } = {}) {
@@ -583,7 +583,7 @@ async function scrollSearchResults(client) {
 
 export async function collectKeywordSearchBatch({
   keywords = [],
-  targetPerKeyword = 10,
+  targetPerKeyword = 3,
   maxScannedPerKeyword = 200,
   minRedHearts = 1000,
   withinDays = 14,
