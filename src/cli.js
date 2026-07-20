@@ -441,6 +441,8 @@ function logKeywordProgress(event = {}) {
     console.error(`done ${event.keyword}: scanned=${event.scanned_count} qualified=${event.qualified_count} stop=${event.stop_reason}`);
   } else if (event.phase === 'keyword_retry') {
     console.error(`retry ${event.keyword}: attempt=${event.attempt}`);
+  } else if (event.phase === 'keyword_resume') {
+    console.error(`resume ${event.keyword}: seeded=${event.seeded}`);
   } else if (event.phase === 'qualified_start') {
     console.error(`ingest ${event.keyword}: ${event.item.id} start`);
   } else if (event.phase === 'qualified_done') {
@@ -497,6 +499,9 @@ async function commandSearchKeywords(args) {
   ensureDir(options.profileDir);
   const qualifiedHook = args['qualified-hook'] ? resolve(String(args['qualified-hook'])) : '';
   if (qualifiedHook && !existsSync(qualifiedHook)) throw new Error(`--qualified-hook was not found: ${qualifiedHook}`);
+  const resumeItem = args['resume-item-json']
+    ? JSON.parse(readFileSync(resolve(String(args['resume-item-json'])), 'utf8'))
+    : null;
   const result = await collectKeywordSearchBatch({
     keywords,
     targetPerKeyword: positiveInteger(args['target-per-keyword'], 10, '--target-per-keyword', 100),
@@ -517,6 +522,8 @@ async function commandSearchKeywords(args) {
         Math.max(60_000, Number(args['qualified-hook-timeout-ms'] || 30 * 60 * 1000)),
       )
       : null,
+    resumeCurrent: parseBool(args['resume-current'], false),
+    seedQualifiedItems: resumeItem ? [resumeItem] : [],
   });
   const report = writeKeywordSearchResults(outDir, result);
   console.log(JSON.stringify({ ok: true, outDir, ...report }, null, 2));

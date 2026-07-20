@@ -196,7 +196,7 @@ test('qualified item transaction applies ingestion before browser back and verif
         return { href: `https://www.douyin.com/video/7611095597914918153`, ready: page === 'detail' };
       }
       if (expression.includes("const input =")) {
-        return { href: 'https://www.douyin.com/jingxuan/search/%23创业', value: '#创业' };
+        return { href: 'https://www.douyin.com/search/%23创业', value: '#创业' };
       }
       if (expression.includes('root.scrollTop =')) {
         events.push('restore-scroll');

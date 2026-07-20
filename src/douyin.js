@@ -113,7 +113,7 @@ async function backToSearchResults(client, origin) {
     })()`);
     let decoded = last?.href || '';
     try { decoded = decodeURIComponent(decoded); } catch {}
-    if (/\/jingxuan\/search\//.test(new URL(last.href).pathname)
+    if (/\/(?:jingxuan\/)?search\//.test(new URL(last.href).pathname)
       && last.value === origin.search_query
       && decoded.includes(origin.search_query)) {
       await client.evaluate(`(() => {
@@ -125,6 +125,22 @@ async function backToSearchResults(client, origin) {
     await sleep(500);
   }
   throw new Error(`Douyin browser back failed; current page: ${last?.href || 'unknown'}`);
+}
+
+async function currentSearchMatches(client, searchQuery) {
+  const state = await client.evaluate(`(() => {
+    const input = [...document.querySelectorAll('input')]
+      .find((node) => /搜索/.test(node.placeholder || node.getAttribute('aria-label') || ''));
+    return { href: location.href, value: input?.value || '' };
+  })()`);
+  let decoded = state?.href || '';
+  try { decoded = decodeURIComponent(decoded); } catch {}
+  return Boolean(
+    state?.href
+    && /\/(?:jingxuan\/)?search\//.test(new URL(state.href).pathname)
+    && state.value === searchQuery
+    && decoded.includes(searchQuery)
+  );
 }
 
 export async function processQualifiedItemTransaction(client, item, {
@@ -581,6 +597,8 @@ export async function collectKeywordSearchBatch({
   onProgress = null,
   onCheckpoint = null,
   onQualified = null,
+  resumeCurrent = false,
+  seedQualifiedItems = [],
 } = {}) {
   const normalizedKeywords = [...new Set(keywords.map((value) => compact(value)).filter(Boolean))];
   if (!normalizedKeywords.length) throw new Error('At least one keyword is required');
@@ -590,7 +608,7 @@ export async function collectKeywordSearchBatch({
   const client = new CDPClient({ commandTimeoutMs: 30000 });
   await client.connect(port, {
     initialUrl: 'https://www.douyin.com/jingxuan',
-    reuseUrlPattern: '^https://www\\.douyin\\.com/jingxuan(?:/search/|$)',
+    reuseUrlPattern: '^https://www\\.douyin\\.com/(?:jingxuan(?:/search/|$)|search/)',
   });
   const keepAlive = setInterval(() => {}, 1000);
   const responseQueue = [];
@@ -615,10 +633,16 @@ export async function collectKeywordSearchBatch({
     const scannedItems = [];
     for (let keywordIndex = 0; keywordIndex < normalizedKeywords.length; keywordIndex += 1) {
       const keyword = normalizedKeywords[keywordIndex];
+      const searchQuery = keyword.startsWith('#') ? keyword : `#${keyword}`;
+      const resumeThisKeyword = Boolean(resumeCurrent && keywordIndex === 0);
       activeKeyword = keyword;
       onProgress?.({ phase: 'keyword_start', keyword, keyword_index: keywordIndex + 1, keyword_total: normalizedKeywords.length });
-      let observed = new Map();
-      const processedQualifiedIds = new Set();
+      let observed = new Map(
+        (resumeThisKeyword ? seedQualifiedItems : [])
+          .filter((item) => item?.id)
+          .map((item) => [String(item.id), item]),
+      );
+      const processedQualifiedIds = new Set(observed.keys());
       let parsedResponses = 0;
       let roundsCompleted = 0;
       let searchAttempts = 0;
@@ -637,9 +661,16 @@ export async function collectKeywordSearchBatch({
           onProgress?.({ phase: 'keyword_retry', keyword, attempt });
           await sleep(Math.max(1500, Number(scrollDelayMs || 0)));
         }
-        await submitSearchKeyword(client, keyword);
+        if (resumeThisKeyword && attempt === 1) {
+          if (!await currentSearchMatches(client, searchQuery)) {
+            throw new Error(`Cannot resume: current Douyin page is not ${searchQuery} search results`);
+          }
+          onProgress?.({ phase: 'keyword_resume', keyword, seeded: observed.size });
+        } else {
+          await submitSearchKeyword(client, keyword);
+        }
         debugSearch(`collector entered scan loop for ${keyword} attempt=${attempt}`);
-        observed = new Map();
+        if (!resumeThisKeyword || attempt > 1) observed = new Map();
         parsedResponses = 0;
         let stableRounds = 0;
         roundsCompleted = 0;
@@ -680,7 +711,7 @@ export async function collectKeywordSearchBatch({
             processedQualifiedIds.add(qualifiedId);
             onProgress?.({ phase: 'qualified_done', keyword, item: qualifiedItem, transaction });
           }
-          if (round === 0 && parsedResponses === 0 && observed.size === 0) {
+          if (round === 0 && parsedResponses === 0 && observed.size === 0 && !resumeThisKeyword) {
             stopReason = 'no_search_response';
             break;
           }
@@ -706,18 +737,19 @@ export async function collectKeywordSearchBatch({
             break;
           }
         }
-        if (parsedResponses > 0) break;
+        if (parsedResponses > 0 || (resumeThisKeyword && attempt === 1)) break;
       }
-      if (parsedResponses === 0) throw new Error(`Douyin returned no structured search response after 2 attempts: ${keyword}`);
+      if (parsedResponses === 0 && !resumeThisKeyword) throw new Error(`Douyin returned no structured search response after 2 attempts: ${keyword}`);
       const report = {
         keyword,
-        search_query: keyword.startsWith('#') ? keyword : `#${keyword}`,
+        search_query: searchQuery,
         keyword_index: keywordIndex + 1,
         stop_reason: stopReason,
         rounds_completed: roundsCompleted,
         search_attempts: searchAttempts,
         parsed_search_responses: parsedResponses,
         observed_unique_count: observed.size,
+        resumed_from_existing_results: resumeThisKeyword,
         ...selection.standard,
       };
       keywordReports.push(report);
