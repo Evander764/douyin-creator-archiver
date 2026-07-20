@@ -213,6 +213,7 @@ async function commandArchive(args) {
     whisperModelPath: String(args['whisper-model'] || process.env.DYCA_WHISPER_MODEL || ''),
     whisperCliPath: String(args['whisper-cli'] || '/opt/homebrew/bin/whisper-cli'),
     ytDlpPath: String(args['yt-dlp-path'] || process.env.DYCA_YT_DLP || 'yt-dlp'),
+    allowMuxedAudio: parseBool(args['allow-muxed-audio'], false),
   });
   console.log(JSON.stringify({ ok: report.ok, total: report.total, succeeded: report.succeeded, failed: report.failed, outDir }, null, 2));
 }
@@ -235,6 +236,7 @@ export async function archiveVideoRows({
   whisperModelPath = '',
   whisperCliPath = '/opt/homebrew/bin/whisper-cli',
   ytDlpPath = 'yt-dlp',
+  allowMuxedAudio = false,
 }) {
   if (transcribe && mode === 'video') throw new Error('--transcribe requires --mode audio or --mode both');
   ensureDir(options.profileDir);
@@ -285,6 +287,7 @@ export async function archiveVideoRows({
           result.audioBytes = audio.bytes;
         } catch (ytDlpError) {
           result.ytDlpError = ytDlpError.message;
+          if (!allowMuxedAudio) throw ytDlpError;
           const resolved = item.download_url
             ? {
               mediaUrl: item.download_url,
@@ -394,6 +397,7 @@ async function commandArchiveUrls(args) {
     whisperModelPath: String(args['whisper-model'] || process.env.DYCA_WHISPER_MODEL || ''),
     whisperCliPath: String(args['whisper-cli'] || '/opt/homebrew/bin/whisper-cli'),
     ytDlpPath: String(args['yt-dlp-path'] || process.env.DYCA_YT_DLP || 'yt-dlp'),
+    allowMuxedAudio: parseBool(args['allow-muxed-audio'], false),
   });
   console.log(JSON.stringify({ ok: report.ok, total: report.total, succeeded: report.succeeded, failed: report.failed, outDir }, null, 2));
 }

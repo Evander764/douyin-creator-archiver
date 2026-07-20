@@ -57,11 +57,11 @@ export async function extractAudio(videoPath, audioPath, { ffmpegPath = '/opt/ho
   return { ok: true, path: audioPath, bytes: statSync(audioPath).size };
 }
 
-export function buildYtDlpAudioArgs(videoUrl, audioPath, profileDir) {
+export function buildYtDlpAudioArgs(videoUrl, audioPath, profileDir, formatId) {
   const outputTemplate = String(audioPath).replace(/\.m4a$/i, '.%(ext)s');
   return [
     '--cookies-from-browser', `chrome:${profileDir}`,
-    '-f', 'bestaudio/best',
+    '-f', formatId,
     '-x',
     '--audio-format', 'm4a',
     '--no-write-thumbnail',
@@ -73,6 +73,12 @@ export function buildYtDlpAudioArgs(videoUrl, audioPath, profileDir) {
   ];
 }
 
+export function selectAudioOnlyFormat(formats = []) {
+  return [...formats]
+    .filter((format) => format?.format_id && format.vcodec === 'none' && format.acodec && format.acodec !== 'none')
+    .sort((a, b) => Number(b.abr || b.tbr || 0) - Number(a.abr || a.tbr || 0))[0] || null;
+}
+
 export async function downloadAudioWithYtDlp(videoUrl, audioPath, {
   profileDir,
   ytDlpPath = 'yt-dlp',
@@ -80,7 +86,25 @@ export async function downloadAudioWithYtDlp(videoUrl, audioPath, {
 } = {}) {
   ensureDir(dirname(audioPath));
   rmSync(audioPath, { force: true });
-  await execFileAsync(ytDlpPath, buildYtDlpAudioArgs(videoUrl, audioPath, profileDir), {
+  const commonArgs = [
+    '--cookies-from-browser', `chrome:${profileDir}`,
+    '--no-playlist',
+    '--no-update',
+  ];
+  const inspected = await execFileAsync(ytDlpPath, [
+    ...commonArgs,
+    '--dump-single-json',
+    '--skip-download',
+    videoUrl,
+  ], {
+    encoding: 'utf8',
+    timeout: Math.min(timeoutMs, 2 * 60 * 1000),
+    maxBuffer: 32 * 1024 * 1024,
+  });
+  const metadata = JSON.parse(inspected.stdout);
+  const audioOnly = selectAudioOnlyFormat(metadata.formats || []);
+  if (!audioOnly) throw new Error('audio_only_unavailable: Douyin did not expose a genuine audio-only format.');
+  await execFileAsync(ytDlpPath, buildYtDlpAudioArgs(videoUrl, audioPath, profileDir, audioOnly.format_id), {
     encoding: 'utf8',
     timeout: timeoutMs,
     maxBuffer: 8 * 1024 * 1024,

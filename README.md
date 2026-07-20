@@ -25,7 +25,7 @@ Use this only for content you own, are authorized to archive, or may lawfully pr
 - Node.js 22.5 or newer.
 - `ffmpeg` for audio extraction.
 - `curl`, included with macOS.
-- `yt-dlp` is recommended for `--mode audio`; it handles Douyin pages where the browser exposes separate video-only and audio streams. The CLI falls back to the browser-media path when `yt-dlp` is unavailable.
+- `yt-dlp` is recommended for `--mode audio`. The CLI first inspects formats and downloads only a genuine audio-only stream. When Douyin exposes only muxed video + audio, the default result is `audio_only_unavailable`; it does not silently spend bandwidth on video.
 
 Optional bootstrap check:
 
@@ -134,6 +134,7 @@ Important options:
 - `--transcribe true`: generate voice transcripts with local `whisper-cli`.
 - `--whisper-model PATH`: absolute path to a whisper.cpp model. Can also use `DYCA_WHISPER_MODEL`.
 - `--yt-dlp-path PATH`: optional explicit `yt-dlp` binary path for reliable audio-only extraction. Can also use `DYCA_YT_DLP`.
+- `--allow-muxed-audio true`: explicit opt-in to the legacy fallback that may temporarily download video before extracting audio. Do not use this when visual downloads are excluded.
 
 Each `creator-videos.jsonl` row can include:
 

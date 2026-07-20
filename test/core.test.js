@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parseArgs, sanitizeSegment } from '../src/utils.js';
 import { normalizeStructuredVideo, normalizeVideoUrl, parseCreatorPostPayload, parseDouyinVideoId } from '../src/douyin.js';
-import { buildYtDlpAudioArgs } from '../src/download.js';
+import { buildYtDlpAudioArgs, selectAudioOnlyFormat } from '../src/download.js';
 import { filterByMinimumLikes, writeArchiveReport } from '../src/cli.js';
 
 test('parseDouyinVideoId supports video and modal urls', () => {
@@ -89,11 +89,22 @@ test('1000-like standard is inclusive and excludes missing metrics', () => {
   assert.equal(result.standard.missing_like_count, 1);
 });
 
-test('yt-dlp audio args use the dedicated Chrome profile and remove source video', () => {
-  const args = buildYtDlpAudioArgs('https://www.douyin.com/video/123456789', '/tmp/audio.m4a', '/tmp/profile');
+test('yt-dlp audio args use the dedicated Chrome profile and selected audio-only format', () => {
+  const args = buildYtDlpAudioArgs('https://www.douyin.com/video/123456789', '/tmp/audio.m4a', '/tmp/profile', 'audio-128k');
   assert.deepEqual(args.slice(0, 2), ['--cookies-from-browser', 'chrome:/tmp/profile']);
+  assert.equal(args[3], 'audio-128k');
   assert.ok(args.includes('-x'));
   assert.ok(args.includes('m4a'));
   assert.ok(args.includes('/tmp/audio.%(ext)s'));
   assert.equal(args.at(-1), 'https://www.douyin.com/video/123456789');
+});
+
+test('audio-only selection rejects muxed video and picks the best genuine audio track', () => {
+  const selected = selectAudioOnlyFormat([
+    { format_id: 'muxed', vcodec: 'h265', acodec: 'aac', tbr: 400 },
+    { format_id: 'audio-low', vcodec: 'none', acodec: 'aac', abr: 64 },
+    { format_id: 'audio-high', vcodec: 'none', acodec: 'aac', abr: 128 },
+  ]);
+  assert.equal(selected.format_id, 'audio-high');
+  assert.equal(selectAudioOnlyFormat([{ format_id: 'muxed', vcodec: 'h264', acodec: 'aac' }]), null);
 });
