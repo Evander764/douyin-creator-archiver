@@ -18,6 +18,19 @@ export function normalizeVideoUrl(url = '') {
   return id ? `https://www.douyin.com/video/${id}` : String(url || '');
 }
 
+export function isCleanSearchResultUrl(url = '', searchQuery = '') {
+  try {
+    const parsed = new URL(url);
+    let decoded = parsed.href;
+    try { decoded = decodeURIComponent(decoded); } catch {}
+    return /\/(?:jingxuan\/)?search\//.test(parsed.pathname)
+      && !parsed.searchParams.has('modal_id')
+      && (!searchQuery || decoded.includes(searchQuery));
+  } catch {
+    return false;
+  }
+}
+
 function compact(value = '') {
   return String(value || '').replace(/\s+/g, ' ').trim();
 }
@@ -86,6 +99,8 @@ async function openQualifiedVideo(client, item, searchQuery) {
     if (!target) {
       return { ok: false, reason: 'visible_result_card_not_found', ...before };
     }
+    const checkpointState = history.state && typeof history.state === 'object' ? history.state : {};
+    history.pushState({ ...checkpointState, __dyca_search_checkpoint: true }, document.title, location.href);
     target.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'instant' });
     if (anchor) anchor.removeAttribute('target');
     target.click();
@@ -106,13 +121,8 @@ async function backToSearchResults(client, origin) {
   if (typeof client.send === 'function') {
     try {
       const history = await client.send('Page.getNavigationHistory');
-      const target = [...(history?.entries || [])].reverse().find((entry) => {
-        let decoded = entry.url || '';
-        try { decoded = decodeURIComponent(decoded); } catch {}
-        return entry.url === origin.href
-          || (/\/(?:jingxuan\/)?search\//.test(new URL(entry.url).pathname)
-            && decoded.includes(origin.search_query));
-      });
+      const target = [...(history?.entries || [])].reverse()
+        .find((entry) => isCleanSearchResultUrl(entry.url, origin.search_query));
       if (target && target.id !== history?.entries?.[history.currentIndex]?.id) {
         await client.send('Page.navigateToHistoryEntry', { entryId: target.id });
       }
@@ -126,11 +136,9 @@ async function backToSearchResults(client, origin) {
         .find((node) => /搜索/.test(node.placeholder || node.getAttribute('aria-label') || ''));
       return { href: location.href, value: input?.value || '' };
     })()`);
-    let decoded = last?.href || '';
-    try { decoded = decodeURIComponent(decoded); } catch {}
-    if (/\/(?:jingxuan\/)?search\//.test(new URL(last.href).pathname)
+    if (isCleanSearchResultUrl(last?.href, origin.search_query)
       && last.value === origin.search_query
-      && decoded.includes(origin.search_query)) {
+    ) {
       await client.evaluate(`(() => {
         const root = document.scrollingElement || document.documentElement;
         root.scrollTop = ${JSON.stringify(Number(origin.scroll_top || 0))};
@@ -162,13 +170,10 @@ async function currentSearchMatches(client, searchQuery) {
       .find((node) => /搜索/.test(node.placeholder || node.getAttribute('aria-label') || ''));
     return { href: location.href, value: input?.value || '' };
   })()`);
-  let decoded = state?.href || '';
-  try { decoded = decodeURIComponent(decoded); } catch {}
   return Boolean(
     state?.href
-    && /\/(?:jingxuan\/)?search\//.test(new URL(state.href).pathname)
+    && isCleanSearchResultUrl(state.href, searchQuery)
     && state.value === searchQuery
-    && decoded.includes(searchQuery)
   );
 }
 

@@ -18,6 +18,7 @@ import {
   normalizeSearchCardObservation,
   itemMatchesKeyword,
   isTransientSearchScrollFailure,
+  isCleanSearchResultUrl,
   keywordSearchAttemptLimit,
   processQualifiedItemTransaction,
   selectVisibleQualifiedCandidate,
@@ -31,6 +32,12 @@ test('parseDouyinVideoId supports video and modal urls', () => {
   assert.equal(parseDouyinVideoId('https://www.douyin.com/video/7611095597914918153'), '7611095597914918153');
   assert.equal(parseDouyinVideoId('https://www.douyin.com/search/x?modal_id=7611095597914918153&type=video'), '7611095597914918153');
   assert.equal(normalizeVideoUrl('https://www.douyin.com/search/x?modal_id=7611095597914918153&type=video'), 'https://www.douyin.com/video/7611095597914918153');
+});
+
+test('search restoration accepts only the clean keyword history entry, never a modal overlay', () => {
+  assert.equal(isCleanSearchResultUrl('https://www.douyin.com/search/%23%E5%88%9B%E4%B8%9A?type=general', '#创业'), true);
+  assert.equal(isCleanSearchResultUrl('https://www.douyin.com/jingxuan/search/%23%E5%88%9B%E4%B8%9A?modal_id=7611095597914918153&type=general', '#创业'), false);
+  assert.equal(isCleanSearchResultUrl('https://www.douyin.com/search/%23AI?type=general', '#创业'), false);
 });
 
 test('dedicated Chrome is detached so CLI exit cannot close the reusable Douyin window', () => {
