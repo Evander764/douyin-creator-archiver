@@ -428,6 +428,21 @@ export function applyKeywordSearchStandard(items = [], {
   };
 }
 
+export function selectVisibleQualifiedCandidate(items = [], visibleIds = [], attemptedIds = [], options = {}) {
+  const visible = new Set([...visibleIds].map(String));
+  const attempted = new Set([...attemptedIds].map(String));
+  const maxScanned = Number(options.maxScanned || options.maxScannedPerKeyword || 200);
+  const selection = applyKeywordSearchStandard(items, {
+    ...options,
+    target: maxScanned,
+    maxScanned,
+  });
+  return selection.qualified_items.find((candidate) => {
+    const id = String(candidate.id || parseDouyinVideoId(candidate.url) || '');
+    return visible.has(id) && !attempted.has(id);
+  }) || null;
+}
+
 export async function fetchStructuredVideoDetail(client, videoUrl, defaults = {}) {
   const id = parseDouyinVideoId(videoUrl);
   if (!id) return { ok: false, error: 'missing_video_id', item: null };
@@ -879,20 +894,23 @@ export async function collectKeywordSearchBatch({
             if (item.id && !observed.has(item.id)) observed.set(item.id, item);
           }
           const cardItems = await collectVisibleSearchCards(client, capturedAt);
+          const visibleCardIds = new Set(cardItems.map((item) => String(item.id)));
           for (const item of cardItems) {
             if (item.id && !observed.has(item.id)) observed.set(item.id, item);
           }
           while (verifiedQualifiedItems.size < targetPerKeyword) {
-            selection = applyKeywordSearchStandard([...observed.values()], {
+            const qualifiedItem = selectVisibleQualifiedCandidate(
+              [...observed.values()],
+              visibleCardIds,
+              attemptedCandidateIds,
+              {
               keyword,
               minRedHearts,
               withinDays,
-              target: targetPerKeyword,
               maxScanned: maxScannedPerKeyword,
               capturedAt,
-            });
-            const qualifiedItem = selection.qualified_items
-              .find((candidate) => !attemptedCandidateIds.has(String(candidate.id || parseDouyinVideoId(candidate.url) || '')));
+              },
+            );
             if (!qualifiedItem) break;
             const qualifiedId = String(qualifiedItem.id || parseDouyinVideoId(qualifiedItem.url) || '');
             attemptedCandidateIds.add(qualifiedId);

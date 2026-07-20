@@ -444,7 +444,7 @@ function logKeywordProgress(event = {}) {
   } else if (event.phase === 'keyword_resume') {
     console.error(`resume ${event.keyword}: seeded=${event.seeded}`);
   } else if (event.phase === 'qualified_start') {
-    console.error(`verify ${event.keyword}: ${event.item.id} detail opened`);
+    console.error(`candidate ${event.keyword}: ${event.item.id} visible; opening detail`);
   } else if (event.phase === 'backup_tab_created') {
     console.error(`copy ${event.keyword}: ${event.item.id} backup tab=${event.backup_target_id}`);
   } else if (event.phase === 'qualified_done') {

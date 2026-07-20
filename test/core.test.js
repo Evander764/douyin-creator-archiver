@@ -19,6 +19,7 @@ import {
   itemMatchesKeyword,
   keywordSearchAttemptLimit,
   processQualifiedItemTransaction,
+  selectVisibleQualifiedCandidate,
 } from '../src/douyin.js';
 import { buildYtDlpAudioArgs, selectAudioOnlyFormat, validateAudioDuration, validateAudioOnlyProbe } from '../src/download.js';
 import {
@@ -234,6 +235,32 @@ test('keyword search standard stops at 1 qualified item or 200 scanned items', (
   const limitStopped = applyKeywordSearchStandard(ineligible, { capturedAt, target: 1, maxScanned: 200 });
   assert.equal(limitStopped.standard.scanned_count, 200);
   assert.equal(limitStopped.standard.qualified_count, 0);
+});
+
+test('visible-card gate skips an earlier network candidate that is not rendered yet', () => {
+  const items = [
+    {
+      id: '7611095597914918301',
+      url: 'https://www.douyin.com/video/7611095597914918301',
+      title: '个人IP 方法一',
+      red_heart_count: 5000,
+      publish_time: '2026-07-19T00:00:00.000Z',
+    },
+    {
+      id: '7611095597914918302',
+      url: 'https://www.douyin.com/video/7611095597914918302',
+      title: '个人IP 方法二',
+      red_heart_count: 6000,
+      publish_time: '2026-07-18T00:00:00.000Z',
+    },
+  ];
+  const selected = selectVisibleQualifiedCandidate(
+    items,
+    new Set(['7611095597914918302']),
+    new Set(),
+    { keyword: '个人IP', capturedAt: '2026-07-20T12:00:00.000Z', withinDays: 120, maxScanned: 200 },
+  );
+  assert.equal(selected.id, '7611095597914918302');
 });
 
 test('qualified item transaction applies ingestion before browser back and verifies restored search', async () => {
