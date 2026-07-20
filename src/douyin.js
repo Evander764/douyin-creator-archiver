@@ -95,7 +95,9 @@ async function openQualifiedVideo(client, item, searchQuery) {
       .find((node) => String(node.href || '').includes('/video/' + ${JSON.stringify(id)}));
     const card = document.getElementById('waterfall_item_' + ${JSON.stringify(id)});
     const before = { href: location.href, scroll_top: root.scrollTop };
-    const target = anchor || card?.querySelector('.videoImage') || card?.querySelector('.search-result-card') || card;
+    // Click the card's own handler. Hovering the cover mounts a preview
+    // <video> that can intercept pointer events without opening the detail.
+    const target = anchor || card?.querySelector('.PtY9QFFE') || card?.querySelector('.search-result-card') || card;
     if (!target) {
       return { ok: false, reason: 'visible_result_card_not_found', ...before };
     }
@@ -103,21 +105,25 @@ async function openQualifiedVideo(client, item, searchQuery) {
     history.pushState({ ...checkpointState, __dyca_search_checkpoint: true }, document.title, location.href);
     target.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'instant' });
     if (anchor) anchor.removeAttribute('target');
-    const rect = target.getBoundingClientRect();
     return {
       ok: true,
       opened_by: anchor ? 'visible_result_link' : 'visible_result_card',
-      click_point: { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 },
       ...before,
     };
   })()`);
   if (!origin?.ok) throw new Error(`Douyin qualified-item open failed: ${origin?.reason || 'unknown'}`);
-  if (origin.click_point && typeof client.send === 'function') {
-    const { x, y } = origin.click_point;
-    await client.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y });
-    await client.send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 1 });
-    await client.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 1 });
-  }
+  await sleep(500);
+  const clicked = await client.evaluate(`(() => {
+    const anchor = [...document.querySelectorAll('a[href*="/video/"]')]
+      .find((node) => String(node.href || '').includes('/video/' + ${JSON.stringify(id)}));
+    const card = document.getElementById('waterfall_item_' + ${JSON.stringify(id)});
+    const target = anchor || card?.querySelector('.PtY9QFFE') || card?.querySelector('.search-result-card') || card;
+    if (!target) return false;
+    if (anchor) anchor.removeAttribute('target');
+    target.click();
+    return true;
+  })()`);
+  if (!clicked) throw new Error('Douyin qualified-item click target disappeared');
   const deadline = Date.now() + 30000;
   while (Date.now() < deadline) {
     const state = await client.evaluate(`({ href: location.href, ready: location.href.includes(${JSON.stringify(id)}) })`);
@@ -150,11 +156,29 @@ async function backToSearchResults(client, origin) {
     if (isCleanSearchResultUrl(last?.href, origin.search_query)
       && last.value === origin.search_query
     ) {
-      await client.evaluate(`(() => {
-        const root = document.scrollingElement || document.documentElement;
-        root.scrollTop = ${JSON.stringify(Number(origin.scroll_top || 0))};
-      })()`);
+      try {
+        await client.evaluate(`(() => {
+          const root = document.scrollingElement || document.documentElement;
+          if (root) root.scrollTop = ${JSON.stringify(Number(origin.scroll_top || 0))};
+          return true;
+        })()`);
+      } catch {
+        // The URL and visible query are already restored. A transient React
+        // execution-context swap must not abort the entire search lane merely
+        // because the saved scroll offset could not be applied.
+      }
       return last;
+    }
+    if (isCleanSearchResultUrl(last?.href, origin.search_query) && last.value !== origin.search_query) {
+      await client.evaluate(`(() => {
+        const input = [...document.querySelectorAll('input')]
+          .find((node) => /搜索/.test(node.placeholder || node.getAttribute('aria-label') || ''));
+        if (!input) return false;
+        const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+        setter?.call(input, ${JSON.stringify(origin.search_query)});
+        input.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: ${JSON.stringify(origin.search_query)} }));
+        return Boolean(input);
+      })()`);
     }
     await sleep(500);
   }
@@ -176,11 +200,28 @@ async function duplicateQualifiedDetail(client, origin) {
 }
 
 async function currentSearchMatches(client, searchQuery) {
-  const state = await client.evaluate(`(() => {
+  let state = await client.evaluate(`(() => {
     const input = [...document.querySelectorAll('input')]
       .find((node) => /搜索/.test(node.placeholder || node.getAttribute('aria-label') || ''));
     return { href: location.href, value: input?.value || '' };
   })()`);
+  if (isCleanSearchResultUrl(state?.href, searchQuery) && state.value !== searchQuery) {
+    await client.evaluate(`(() => {
+      const input = [...document.querySelectorAll('input')]
+        .find((node) => /搜索/.test(node.placeholder || node.getAttribute('aria-label') || ''));
+      if (!input) return false;
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+      setter?.call(input, ${JSON.stringify(searchQuery)});
+      input.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: ${JSON.stringify(searchQuery)} }));
+      return Boolean(input);
+    })()`);
+    await sleep(200);
+    state = await client.evaluate(`(() => {
+      const input = [...document.querySelectorAll('input')]
+        .find((node) => /搜索/.test(node.placeholder || node.getAttribute('aria-label') || ''));
+      return { href: location.href, value: input?.value || '' };
+    })()`);
+  }
   return Boolean(
     state?.href
     && isCleanSearchResultUrl(state.href, searchQuery)
@@ -201,7 +242,12 @@ export async function processQualifiedItemTransaction(client, item, {
 } = {}) {
   const origin = await openQualifiedVideo(client, item, searchQuery);
   try {
-    const detail = await fetchStructuredVideoDetailWithRetry(client, item.url, item);
+    // Search API rows are already the platform's exact structured payload and
+    // include statistics, create_time and music.play_url. Re-fetch only DOM
+    // card observations, whose abbreviated label/date still require proof.
+    const detail = item.metadata_status === 'structured'
+      ? { ok: true, item }
+      : await fetchStructuredVideoDetailWithRetry(client, item.url, item);
     if (!detail.ok) {
       return { processed: false, rejected_reason: detail.error || 'structured_detail_unavailable' };
     }
@@ -569,7 +615,7 @@ async function waitForUsableDouyinPage(client, { timeoutMs = 45000 } = {}) {
     last = await client.evaluate(`
       (() => {
         const text = String(document.body?.innerText || '').replace(/\\s+/g, ' ').trim();
-        const riskControl = /验证码|安全验证|验证一下|访问太频繁|请稍后再试|环境异常|操作过于频繁/.test(text);
+        const riskControl = /安全验证|滑块验证|验证一下|访问太频繁|请稍后再试|环境异常|操作过于频繁/.test(text);
         const loginRequired = /登录后|扫码登录|密码登录|手机号登录|请先登录/.test(text);
         const videoLinks = Array.from(document.querySelectorAll('a[href]')).filter((a) => /douyin\\.com\\/video\\//.test(new URL(a.getAttribute('href'), location.href).href)).length;
         return { ok: /douyin\\.com$/i.test(location.host) && !riskControl && !loginRequired, riskControl, loginRequired, videoLinks, href: location.href };
@@ -636,7 +682,7 @@ async function waitForSearchInput(client, { timeoutMs = 60000 } = {}) {
       ready: document.readyState === 'complete',
       page_age_ms: Math.round(performance.now()),
       href: location.href,
-      risk_control: /验证码|安全验证|验证一下|访问太频繁|请稍后再试|环境异常|操作过于频繁/.test(text),
+      risk_control: /安全验证|滑块验证|验证一下|环境异常/.test(text),
       login_required: /扫码登录|密码登录|手机号登录|请先登录/.test(text),
       };
     })()`);
@@ -698,10 +744,10 @@ async function submitSearchKeyword(client, keyword) {
     `);
   }
   if (!cleared) throw new Error('Douyin search UI failed: previous_keyword_not_cleared');
-  for (const character of searchQuery) {
-    await client.send('Input.insertText', { text: character });
-    await sleep(90);
-  }
+  // Douyin may re-render the search input while typing. Insert the complete
+  // query in one focused-input operation so characters are not lost.
+  await client.send('Input.insertText', { text: searchQuery });
+  await sleep(Math.max(200, searchQuery.length * 35));
   debugSearch(`typing completed for ${searchQuery}`);
   const action = await client.evaluate(`
     (() => {
@@ -718,6 +764,7 @@ async function submitSearchKeyword(client, keyword) {
   `);
   if (!action?.ok) throw new Error(`Douyin search UI failed: ${action?.reason || 'unknown'}${action?.value ? ` (actual: ${action.value})` : ''}`);
   debugSearch(`search button clicked for ${searchQuery}`);
+  await sleep(1500);
 
   const deadline = Date.now() + 45000;
   let last = null;
@@ -738,7 +785,8 @@ async function submitSearchKeyword(client, keyword) {
             && input?.value === ${JSON.stringify(searchQuery)}
             && (location.href !== ${JSON.stringify(previousHref)} || decodedPreviousHref.includes(${JSON.stringify(searchQuery)}))
             && decodedHref.includes(${JSON.stringify(searchQuery)}),
-          risk_control: /验证码|安全验证|验证一下|访问太频繁|请稍后再试|环境异常|操作过于频繁/.test(text),
+          risk_control: /安全验证|滑块验证|验证一下|环境异常/.test(text),
+          rate_limited: /搜索过于频繁|访问太频繁|请稍后再试|操作过于频繁/.test(text),
           login_required: /扫码登录|密码登录|手机号登录|请先登录/.test(text),
         };
       })()
@@ -748,6 +796,11 @@ async function submitSearchKeyword(client, keyword) {
     if (last?.ready) {
       debugSearch(`results page ready for ${searchQuery}`);
       break;
+    }
+    if (last?.rate_limited) {
+      const error = new Error('Douyin search is rate limited');
+      error.code = 'DOUYIN_RATE_LIMITED';
+      throw error;
     }
     await sleep(750);
   }
@@ -830,9 +883,10 @@ export async function collectKeywordSearchBatch({
   maxScannedPerKeyword = 200,
   minRedHearts = 1000,
   withinDays = 120,
-  maxScrollRounds = 80,
+  maxScrollRounds = 200,
   scrollDelayMs = 2500,
   responseWaitMs = 15000,
+  rateLimitBackoffMs = 180000,
   profileDir = DEFAULT_PROFILE_DIR,
   chromePath = DEFAULT_CHROME_PATH,
   port = DEFAULT_CDP_PORT,
@@ -840,6 +894,8 @@ export async function collectKeywordSearchBatch({
   onProgress = null,
   onCheckpoint = null,
   onQualified = null,
+  onKeywordBatch = null,
+  deferQualifiedProcessing = false,
   resumeCurrent = false,
   seedQualifiedItems = [],
   excludedTerms = [],
@@ -853,7 +909,7 @@ export async function collectKeywordSearchBatch({
   const client = new CDPClient({ commandTimeoutMs: 30000 });
   await client.connect(port, {
     initialUrl: 'https://www.douyin.com/jingxuan',
-    reuseUrlPattern: '^https://www\\.douyin\\.com/(?:jingxuan(?:/search/|$)|search/)',
+    reuseUrlPattern: '^(?!.*[?&]modal_id=)https://www\\.douyin\\.com/(?:jingxuan(?:/search/|$)|search/)',
   });
   const keepAlive = setInterval(() => {}, 1000);
   const responseQueue = [];
@@ -863,7 +919,7 @@ export async function collectKeywordSearchBatch({
     await client.send('Network.enable');
     client.on('Network.responseReceived', (params) => {
       const url = String(params.response?.url || '');
-      if (!/\/aweme\/v1\/web\/general\/search\/stream\//i.test(url)) return;
+      if (!/\/aweme\/v1\/web\/general\/search\/(?:stream|single)\//i.test(url)) return;
       pendingRequests.set(params.requestId, activeKeyword);
     });
     client.on('Network.loadingFinished', (params) => {
@@ -883,11 +939,10 @@ export async function collectKeywordSearchBatch({
       const resumeThisKeyword = Boolean(resumeCurrent && keywordIndex === 0);
       activeKeyword = keyword;
       onProgress?.({ phase: 'keyword_start', keyword, keyword_index: keywordIndex + 1, keyword_total: normalizedKeywords.length });
-      let observed = new Map(
-        (resumeThisKeyword ? seedQualifiedItems : [])
-          .filter((item) => item?.id)
-          .map((item) => [String(item.id), item]),
-      );
+      const keywordSeedItems = seedQualifiedItems
+        .filter((item) => item?.id && compact(item.keyword).replace(/^#+/, '') === keyword.replace(/^#+/, ''));
+      const seedMap = () => new Map(keywordSeedItems.map((item) => [String(item.id), item]));
+      let observed = seedMap();
       const verifiedQualifiedItems = new Map(observed);
       const attemptedCandidateIds = new Set(observed.keys());
       const previouslyAcceptedIds = new Set(qualifiedItems.map((entry) => String(entry.id || parseDouyinVideoId(entry.url) || '')));
@@ -922,10 +977,25 @@ export async function collectKeywordSearchBatch({
           }
           onProgress?.({ phase: 'keyword_resume', keyword, seeded: observed.size });
         } else {
-          await submitSearchKeyword(client, keyword);
+          let submitted = false;
+          for (let rateAttempt = 1; rateAttempt <= 3 && !submitted; rateAttempt += 1) {
+            try {
+              await submitSearchKeyword(client, keyword);
+              submitted = true;
+            } catch (error) {
+              if (error?.code !== 'DOUYIN_RATE_LIMITED' || rateAttempt >= 3) throw error;
+              onProgress?.({
+                phase: 'rate_limit_wait',
+                keyword,
+                attempt: rateAttempt,
+                wait_ms: rateLimitBackoffMs,
+              });
+              await sleep(rateLimitBackoffMs);
+            }
+          }
         }
         debugSearch(`collector entered scan loop for ${keyword} attempt=${attempt}`);
-        if (!resumeThisKeyword || attempt > 1) observed = new Map();
+        if (!resumeThisKeyword || attempt > 1) observed = seedMap();
         parsedResponses = 0;
         let stableRounds = 0;
         let transientScrollRounds = 0;
@@ -942,7 +1012,7 @@ export async function collectKeywordSearchBatch({
             if (item.id && !observed.has(item.id)) observed.set(item.id, applyExclusion(item));
           }
           const cardItems = await collectVisibleSearchCards(client, capturedAt);
-          const visibleCardIds = new Set(cardItems.map((item) => String(item.id)));
+          let visibleCardIds = new Set(cardItems.map((item) => String(item.id)));
           for (const item of cardItems) {
             if (item.id && !observed.has(item.id)) observed.set(item.id, applyExclusion(item));
           }
@@ -963,17 +1033,32 @@ export async function collectKeywordSearchBatch({
             const qualifiedId = String(qualifiedItem.id || parseDouyinVideoId(qualifiedItem.url) || '');
             attemptedCandidateIds.add(qualifiedId);
             onProgress?.({ phase: 'qualified_start', keyword, item: qualifiedItem });
-            const transaction = await processQualifiedItemTransaction(client, qualifiedItem, {
-              searchQuery,
-              onQualified,
-              keyword,
-              minRedHearts,
-              withinDays,
-              capturedAt,
-              excludedTerms,
-              excludedVideoIds: [...explicitlyExcludedIds, ...previouslyAcceptedIds],
-              onBackupCreated: (backup) => onProgress?.({ phase: 'backup_tab_created', keyword, ...backup }),
-            });
+            let transaction;
+            try {
+              transaction = await processQualifiedItemTransaction(client, qualifiedItem, {
+                searchQuery,
+                onQualified: deferQualifiedProcessing ? null : onQualified,
+                keyword,
+                minRedHearts,
+                withinDays,
+                capturedAt,
+                excludedTerms,
+                excludedVideoIds: [...explicitlyExcludedIds, ...previouslyAcceptedIds],
+                onBackupCreated: (backup) => onProgress?.({ phase: 'backup_tab_created', keyword, ...backup }),
+              });
+            } catch (error) {
+              // Waterfall virtualization can remove a card between observation
+              // and click. Continue only when the visible search state is still
+              // intact; navigation/back failures remain fatal.
+              let searchRestored = false;
+              for (let check = 0; check < 6 && !searchRestored; check += 1) {
+                try { searchRestored = await currentSearchMatches(client, searchQuery); }
+                catch {}
+                if (!searchRestored) await sleep(300);
+              }
+              if (!searchRestored) throw error;
+              transaction = { processed: false, rejected_reason: error.message || 'candidate_open_failed' };
+            }
             if (transaction.processed) {
               verifiedQualifiedItems.set(qualifiedId, transaction.item);
               observed.set(qualifiedId, transaction.item);
@@ -985,6 +1070,11 @@ export async function collectKeywordSearchBatch({
                 structured_verification_error: transaction.rejected_reason,
               });
               onProgress?.({ phase: 'qualified_rejected', keyword, item: qualifiedItem, transaction });
+            }
+            const refreshedCards = await collectVisibleSearchCards(client, capturedAt);
+            visibleCardIds = new Set(refreshedCards.map((entry) => String(entry.id)));
+            for (const entry of refreshedCards) {
+              if (entry.id && !observed.has(entry.id)) observed.set(entry.id, applyExclusion(entry));
             }
           }
           selection = applyKeywordSearchStandard([...observed.values()], {
@@ -1014,7 +1104,21 @@ export async function collectKeywordSearchBatch({
             stopReason = 'scan_limit_reached';
             break;
           }
-          const scroll = await scrollSearchResults(client);
+          let scroll = null;
+          let scrollError = null;
+          for (let scrollAttempt = 0; scrollAttempt < 4 && !scroll; scrollAttempt += 1) {
+            try { scroll = await scrollSearchResults(client); }
+            catch (error) {
+              scrollError = error;
+              await sleep(300);
+            }
+          }
+          if (!scroll) {
+            let searchIntact = false;
+            try { searchIntact = await currentSearchMatches(client, searchQuery); } catch {}
+            if (!searchIntact) throw scrollError || new Error('Douyin search scroll failed');
+            scroll = { ok: false, reason: 'scroll_container_not_found' };
+          }
           debugSearch(`scroll keyword=${keyword} ok=${scroll?.ok} before=${scroll?.before ?? 'n/a'} after=${scroll?.after ?? 'n/a'}`);
           if (!scroll?.ok) {
             if (!isTransientSearchScrollFailure(scroll?.reason)) {
@@ -1065,6 +1169,15 @@ export async function collectKeywordSearchBatch({
       scannedItems.push(...selection.scanned_items);
       qualifiedItems.push(...verifiedQualifiedItems.values());
       onProgress?.({ phase: 'keyword_done', ...report });
+      if (deferQualifiedProcessing && typeof onKeywordBatch === 'function') {
+        const seedIds = new Set(keywordSeedItems
+          .filter((item) => item.metadata_status === 'seeded_verified_ingestion')
+          .map((item) => String(item.id)));
+        const batchItems = [...verifiedQualifiedItems.values()]
+          .filter((item) => !seedIds.has(String(item.id)));
+        await onKeywordBatch(batchItems, { keyword, search_query: searchQuery });
+        onProgress?.({ phase: 'keyword_batch_queued', keyword, count: batchItems.length });
+      }
       await onCheckpoint?.({
         captured_at: capturedAt,
         keywords: normalizedKeywords,

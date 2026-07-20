@@ -346,7 +346,7 @@ test('qualified item transaction applies ingestion before browser back and verif
     },
   });
   assert.equal(result.processed, true);
-  assert.deepEqual(events, ['open', 'mouse-mouseMoved', 'mouse-mousePressed', 'mouse-mouseReleased', 'backup-tab', 'ingest', 'back', 'restore-scroll']);
+  assert.deepEqual(events, ['open', 'open', 'backup-tab', 'ingest', 'back', 'restore-scroll']);
 });
 
 test('qualified item transaction returns through browser history when a note adds a second detail entry', async () => {
@@ -428,7 +428,7 @@ test('qualified item transaction returns through browser history when a note add
     },
   });
   assert.equal(result.processed, true);
-  assert.deepEqual(events, ['open', 'backup-tab', 'ingest', 'back', 'history-entry-back', 'restore-scroll']);
+  assert.deepEqual(events, ['open', 'open', 'backup-tab', 'ingest', 'back', 'history-entry-back', 'restore-scroll']);
 });
 
 test('streaming hook queue starts work without blocking search and caps worker concurrency', async () => {

@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { join, resolve } from 'node:path';
@@ -448,9 +448,14 @@ function logKeywordProgress(event = {}) {
   } else if (event.phase === 'backup_tab_created') {
     console.error(`copy ${event.keyword}: ${event.item.id} backup tab=${event.backup_target_id}`);
   } else if (event.phase === 'qualified_done') {
-    console.error(`queue ${event.keyword}: ${event.item.id} copied; browser back verified`);
+    if (event.transaction?.backup) console.error(`queue ${event.keyword}: ${event.item.id} copied; browser back verified`);
+    else console.error(`record ${event.keyword}: ${event.item.id} URL verified; browser back verified`);
   } else if (event.phase === 'qualified_rejected') {
     console.error(`reject ${event.keyword}: ${event.item.id} reason=${event.transaction?.rejected_reason || 'unknown'}`);
+  } else if (event.phase === 'keyword_batch_queued') {
+    console.error(`batch ${event.keyword}: queued=${event.count}`);
+  } else if (event.phase === 'rate_limit_wait') {
+    console.error(`cooldown ${event.keyword}: search rate limited; retrying in ${Math.round(event.wait_ms / 1000)}s`);
   }
 }
 
@@ -508,10 +513,11 @@ export function createQualifiedHookQueue({ script, outDir, timeoutMs, concurrenc
   };
   return {
     enqueue(item, context = {}) {
+      const batchMode = context.mode === 'keyword_batch';
       const enriched = {
         ...item,
         pipeline: {
-          mode: 'streaming_parallel',
+          mode: batchMode ? 'keyword_batch' : 'streaming_parallel',
           backup_target_id: context.backup_target_id,
           backup_url: context.backup_url,
           cdp_port: context.port,
@@ -568,19 +574,45 @@ async function commandSearchKeywords(args) {
   const keywords = parseKeywords(args);
   if (!keywords.length) throw new Error('Provide --keywords-file FILE or --keywords "词1,词2"');
   const outDir = resolve(String(args.out || './douyin-keyword-search'));
+  ensureDir(outDir);
   const options = commonOptions(args);
   ensureDir(options.profileDir);
   const qualifiedHook = args['qualified-hook'] ? resolve(String(args['qualified-hook'])) : '';
   if (qualifiedHook && !existsSync(qualifiedHook)) throw new Error(`--qualified-hook was not found: ${qualifiedHook}`);
-  const resumeItem = args['resume-item-json']
+  const resumePayload = args['resume-item-json']
     ? JSON.parse(readFileSync(resolve(String(args['resume-item-json'])), 'utf8'))
     : null;
+  const configuredSeedItems = resumePayload
+    ? (Array.isArray(resumePayload) ? resumePayload : [resumePayload])
+    : [];
+  const recordedUrlsPath = join(outDir, 'qualified-urls.jsonl');
+  const recordedSeedItems = existsSync(recordedUrlsPath)
+    ? readFileSync(recordedUrlsPath, 'utf8').split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line))
+    : [];
+  const seedQualifiedItems = [...new Map(
+    [...recordedSeedItems, ...configuredSeedItems]
+      .filter((item) => item?.id)
+      .map((item) => [String(item.id), item]),
+  ).values()];
   const hookQueue = qualifiedHook ? createQualifiedHookQueue({
     script: qualifiedHook,
     outDir,
     timeoutMs: Math.max(60_000, Number(args['qualified-hook-timeout-ms'] || 30 * 60 * 1000)),
     concurrency: positiveInteger(args['hook-concurrency'], 2, '--hook-concurrency', 8),
   }) : null;
+  const hookDispatch = String(args['hook-dispatch'] || 'streaming');
+  if (!['streaming', 'per-keyword'].includes(hookDispatch)) {
+    throw new Error('--hook-dispatch must be streaming or per-keyword');
+  }
+  const recordedIds = new Set(recordedSeedItems.map((item) => String(item.id)));
+  const onProgress = (event) => {
+    logKeywordProgress(event);
+    if (hookDispatch !== 'per-keyword' || event.phase !== 'qualified_done') return;
+    const id = String(event.item?.id || '');
+    if (!id || recordedIds.has(id)) return;
+    appendFileSync(recordedUrlsPath, `${JSON.stringify({ ...event.item, record_state: 'pending_batch' })}\n`);
+    recordedIds.add(id);
+  };
   const result = await collectKeywordSearchBatch({
     keywords,
     targetPerKeyword: positiveInteger(args['target-per-keyword'], 1, '--target-per-keyword', 100),
@@ -589,17 +621,24 @@ async function commandSearchKeywords(args) {
     withinDays: positiveInteger(args['within-days'], 120, '--within-days', 3650),
     excludedTerms: String(args['exclude-terms'] ?? '刘思毅,群响刘老板').split(/[，,\n]/).map((value) => value.trim()).filter(Boolean),
     excludedVideoIds: String(args['exclude-video-ids'] || '').split(/[，,\n]/).map((value) => value.trim()).filter(Boolean),
-    maxScrollRounds: positiveInteger(args['max-scroll-rounds'], 80, '--max-scroll-rounds', 500),
+    maxScrollRounds: positiveInteger(args['max-scroll-rounds'], 200, '--max-scroll-rounds', 500),
     scrollDelayMs: Math.max(500, Number(args['scroll-delay-ms'] || 2500)),
     responseWaitMs: Math.max(3000, Number(args['response-wait-ms'] || 15000)),
+    rateLimitBackoffMs: Math.max(30_000, Number(args['rate-limit-backoff-ms'] || 180_000)),
     ...options,
-    onProgress: logKeywordProgress,
+    onProgress,
     onCheckpoint: (checkpoint) => writeKeywordSearchResults(outDir, checkpoint, 'in_progress'),
-    onQualified: hookQueue
+    onQualified: hookQueue && hookDispatch === 'streaming'
       ? (item, context) => hookQueue.enqueue(item, { ...context, port: options.port })
       : null,
+    onKeywordBatch: hookQueue && hookDispatch === 'per-keyword'
+      ? async (items) => {
+        for (const item of items) hookQueue.enqueue(item, { mode: 'keyword_batch', port: options.port });
+      }
+      : null,
+    deferQualifiedProcessing: Boolean(hookQueue && hookDispatch === 'per-keyword'),
     resumeCurrent: parseBool(args['resume-current'], false),
-    seedQualifiedItems: resumeItem ? [resumeItem] : [],
+    seedQualifiedItems,
   });
   const pipeline = hookQueue ? await hookQueue.drain() : { total: 0, complete: 0, failed: 0, jobs: [] };
   writeFileSync(join(outDir, 'pipeline-report.json'), `${JSON.stringify(pipeline, null, 2)}\n`);
