@@ -201,7 +201,7 @@ function numericMetric(value) {
 export function applyKeywordSearchStandard(items = [], {
   keyword = '',
   minRedHearts = 1000,
-  withinDays = 7,
+  withinDays = 14,
   target = 10,
   maxScanned = 200,
   capturedAt = new Date().toISOString(),
@@ -566,7 +566,7 @@ export async function collectKeywordSearchBatch({
   targetPerKeyword = 10,
   maxScannedPerKeyword = 200,
   minRedHearts = 1000,
-  withinDays = 7,
+  withinDays = 14,
   maxScrollRounds = 80,
   scrollDelayMs = 2500,
   responseWaitMs = 15000,

@@ -134,7 +134,7 @@ test('search stream parser handles byte-length-prefixed UTF-8 JSON frames', () =
   assert.equal(videos[0].red_heart_count, 1300);
 });
 
-test('keyword search standard requires >1000 red hearts and publication within 7 days', () => {
+test('keyword search standard requires >1000 red hearts and publication within 14 days', () => {
   const capturedAt = '2026-07-20T12:00:00.000Z';
   const make = (id, redHeartCount, publishTime) => ({
     id,
@@ -144,10 +144,10 @@ test('keyword search standard requires >1000 red hearts and publication within 7
   });
   const result = applyKeywordSearchStandard([
     make('7611095597914918101', 1000, '2026-07-20T00:00:00.000Z'),
-    make('7611095597914918102', 1001, '2026-07-13T11:59:59.000Z'),
-    make('7611095597914918103', 1001, '2026-07-13T12:00:00.000Z'),
+    make('7611095597914918102', 1001, '2026-07-06T11:59:59.000Z'),
+    make('7611095597914918103', 1001, '2026-07-06T12:00:00.000Z'),
     make('7611095597914918104', 5000, null),
-  ], { keyword: '创业', capturedAt, minRedHearts: 1000, withinDays: 7, target: 10, maxScanned: 200 });
+  ], { keyword: '创业', capturedAt, minRedHearts: 1000, withinDays: 14, target: 10, maxScanned: 200 });
   assert.deepEqual(result.qualified_items.map((item) => item.id), ['7611095597914918103']);
   assert.equal(result.standard.red_heart_operator, '>');
   assert.equal(result.standard.red_heart_at_or_below_count, 1);
