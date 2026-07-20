@@ -66,7 +66,7 @@ dyca archive --creator-url "<creator profile URL>" --out ./douyin-archive --limi
 
 Use `--mode both` when the user explicitly wants video files and audio files.
 
-For `--mode audio`, prefer structured `music.play_url`. Validate the downloaded stream with `ffprobe`; it must contain at least one audio stream, zero video streams, and match the target video's structured duration within 3 seconds. If the field is absent or invalid, only a separately verified audio-only format may be used. Never download muxed video as a fallback.
+For `--mode audio`, collect every unique CDN URL from structured `music.play_url`. Before counting a search result as qualified, compare `music.duration` with the target video's structured duration and reject mismatches over 3 seconds as likely background music, allowing search to continue to a replacement. Try CDN candidates in order. Validate each downloaded stream with `ffprobe`; it must contain at least one audio stream, zero video streams, and match the target video's structured duration within 3 seconds. If every candidate is absent or invalid, only a separately verified audio-only format may be used. Never download muxed video as a fallback.
 
 6. If an upstream ingest queue already has exact video URLs, archive those rows directly:
 

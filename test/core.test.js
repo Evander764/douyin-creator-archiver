@@ -7,6 +7,7 @@ import { parseArgs, sanitizeSegment } from '../src/utils.js';
 import { REUSABLE_CHROME_SPAWN_OPTIONS } from '../src/cdp.js';
 import {
   applyKeywordSearchStandard,
+  assessStructuredAudioForTranscript,
   normalizeStructuredVideo,
   normalizeVideoUrl,
   parseCreatorPostPayload,
@@ -69,7 +70,11 @@ test('normalizeStructuredVideo keeps metrics and exposes music.play_url as pure 
       origin_cover: { url_list: ['https://img.example/cover.jpg'] },
       download_addr: { url_list: ['https://media.example/video.mp4'] },
     },
-    music: { duration: 31, play_url: { url_list: ['https://audio.example/original-sound.m4a'] } },
+    music: { duration: 31, play_url: { url_list: [
+      'https://audio.example/original-sound.m4a',
+      'https://audio-backup.example/original-sound.m4a',
+      'https://audio.example/original-sound.m4a',
+    ] } },
   });
   assert.equal(item.red_heart_count, 13);
   assert.equal(item.like_count, 13);
@@ -78,10 +83,35 @@ test('normalizeStructuredVideo keeps metrics and exposes music.play_url as pure 
   assert.equal(item.share_count, 2);
   assert.equal(item.cover_url, 'https://img.example/cover.jpg');
   assert.equal(item.audio_url, 'https://audio.example/original-sound.m4a');
+  assert.deepEqual(item.audio_candidates, [
+    'https://audio.example/original-sound.m4a',
+    'https://audio-backup.example/original-sound.m4a',
+  ]);
   assert.equal(item.audio_source, 'music.play_url');
   assert.equal(item.music_duration_seconds, 31);
   assert.equal(item.download_url, 'https://media.example/video.mp4');
   assert.equal(item.duration_ms, 30861);
+});
+
+test('structured audio preflight rejects background music and accepts matching pure audio', () => {
+  assert.equal(assessStructuredAudioForTranscript({
+    audio_url: 'https://audio.example/short.m4a',
+    audio_source: 'music.play_url',
+    duration_ms: 132167,
+    music_duration_seconds: 27,
+  }).reason, 'audio_metadata_duration_mismatch');
+  assert.equal(assessStructuredAudioForTranscript({
+    audio_url: 'https://audio.example/full.m4a',
+    audio_source: 'music.play_url',
+    duration_ms: 30500,
+    music_duration_seconds: 30,
+  }).ok, true);
+  assert.equal(assessStructuredAudioForTranscript({}).reason, 'audio_only_unavailable');
+  assert.equal(assessStructuredAudioForTranscript({
+    audio_url: 'https://audio.example/verified.m4a',
+    audio_source: 'verified_audio_only_resource',
+    duration_ms: 120000,
+  }).ok, true);
 });
 
 test('audio probe accepts pure audio, records duration, and rejects any video stream', () => {
@@ -307,6 +337,8 @@ test('qualified item transaction applies ingestion before browser back and verif
               desc: '创业方法',
               create_time: Math.floor(Date.now() / 1000),
               statistics: { digg_count: 1001 },
+              video: { duration: 30000 },
+              music: { duration: 30, play_url: { url_list: ['https://audio.example/full.m4a'] } },
             },
           },
         };
@@ -380,6 +412,8 @@ test('qualified item transaction returns through browser history when a note add
               desc: 'AI 方法',
               create_time: Math.floor(Date.now() / 1000),
               statistics: { digg_count: 1001 },
+              video: { duration: 30000 },
+              music: { duration: 30, play_url: { url_list: ['https://audio.example/full.m4a'] } },
             },
           },
         };

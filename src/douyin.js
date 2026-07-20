@@ -43,6 +43,15 @@ function firstUrl(...groups) {
   return null;
 }
 
+function allUrls(...groups) {
+  const urls = [];
+  for (const group of groups) {
+    if (Array.isArray(group?.url_list)) urls.push(...group.url_list);
+    else if (typeof group === 'string') urls.push(group);
+  }
+  return [...new Set(urls.map((value) => String(value || '').trim()).filter(Boolean))];
+}
+
 function epochToISO(value) {
   const number = Number(value);
   if (!Number.isFinite(number) || number <= 0) return null;
@@ -61,7 +70,8 @@ export function normalizeStructuredVideo(aweme = {}, defaults = {}) {
   const author = aweme.author || {};
   const id = String(aweme.aweme_id || aweme.awemeId || parseDouyinVideoId(defaults.url) || '');
   const title = compact(aweme.desc || aweme.item_title || defaults.title);
-  const audioUrl = firstUrl(music.play_url);
+  const audioCandidates = allUrls(music.play_url);
+  const audioUrl = audioCandidates[0] || null;
   return {
     ...defaults,
     id,
@@ -78,11 +88,45 @@ export function normalizeStructuredVideo(aweme = {}, defaults = {}) {
     share_count: statistics.share_count ?? null,
     cover_url: firstUrl(video.origin_cover, video.raw_cover, video.cover, video.dynamic_cover),
     audio_url: audioUrl,
+    audio_candidates: audioCandidates,
     audio_source: audioUrl ? 'music.play_url' : null,
     music_duration_seconds: Number(music.duration || 0) || null,
     download_url: firstUrl(video.download_addr),
     duration_ms: Number(video.duration || aweme.duration || 0) || null,
     metadata_status: 'structured',
+  };
+}
+
+export function assessStructuredAudioForTranscript(item = {}, toleranceSeconds = 3) {
+  const candidates = allUrls(item.audio_candidates, item.audio_url);
+  if (!candidates.length) {
+    return { ok: false, reason: 'audio_only_unavailable', audio_candidates: [] };
+  }
+  if (item.audio_source === 'verified_audio_only_resource') {
+    return { ok: true, reason: null, audio_candidates: candidates };
+  }
+  const videoDuration = Number(item.duration_ms) > 0 ? Number(item.duration_ms) / 1000 : null;
+  const audioDuration = Number(item.music_duration_seconds) > 0
+    ? Number(item.music_duration_seconds)
+    : null;
+  const tolerance = Math.max(0, Number(toleranceSeconds) || 0);
+  if (videoDuration && audioDuration && Math.abs(videoDuration - audioDuration) > tolerance) {
+    return {
+      ok: false,
+      reason: 'audio_metadata_duration_mismatch',
+      audio_candidates: candidates,
+      video_duration_seconds: videoDuration,
+      audio_duration_seconds: audioDuration,
+      tolerance_seconds: tolerance,
+    };
+  }
+  return {
+    ok: true,
+    reason: null,
+    audio_candidates: candidates,
+    video_duration_seconds: videoDuration,
+    audio_duration_seconds: audioDuration,
+    tolerance_seconds: tolerance,
   };
 }
 
@@ -273,6 +317,15 @@ export async function processQualifiedItemTransaction(client, item, {
         verification: verification.standard,
       };
     }
+    const audioAssessment = assessStructuredAudioForTranscript(verifiedItem);
+    if (!audioAssessment.ok) {
+      return {
+        processed: false,
+        rejected_reason: audioAssessment.reason,
+        audio_assessment: audioAssessment,
+      };
+    }
+    verifiedItem.audio_candidates = audioAssessment.audio_candidates;
     if (typeof onQualified !== 'function') {
       return { processed: true, item: verifiedItem, receipt: null, backup: null };
     }

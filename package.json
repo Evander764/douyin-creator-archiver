@@ -1,6 +1,6 @@
 {
   "name": "douyin-creator-archiver",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Mac-first Douyin keyword search and creator media/transcript archiver.",
   "type": "module",
   "private": false,
