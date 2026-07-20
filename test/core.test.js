@@ -12,6 +12,8 @@ import {
   parseDouyinVideoId,
   parseLengthPrefixedJsonStream,
   parseSearchStreamBody,
+  itemMatchesKeyword,
+  keywordSearchAttemptLimit,
   processQualifiedItemTransaction,
 } from '../src/douyin.js';
 import { buildYtDlpAudioArgs, selectAudioOnlyFormat, validateAudioDuration, validateAudioOnlyProbe } from '../src/download.js';
@@ -141,6 +143,7 @@ test('keyword search standard requires >1000 red hearts and publication within 1
     url: `https://www.douyin.com/video/${id}`,
     red_heart_count: redHeartCount,
     publish_time: publishTime,
+    title: '普通人创业方法',
   });
   const result = applyKeywordSearchStandard([
     make('7611095597914918101', 1000, '2026-07-20T00:00:00.000Z'),
@@ -153,6 +156,26 @@ test('keyword search standard requires >1000 red hearts and publication within 1
   assert.equal(result.standard.red_heart_at_or_below_count, 1);
   assert.equal(result.standard.outside_time_window_count, 1);
   assert.equal(result.standard.missing_publish_time_count, 1);
+});
+
+test('keyword relevance rejects ASCII substrings but accepts real AI terms', () => {
+  assert.equal(itemMatchesKeyword({ title: '#haerin 回归' }, 'AI'), false);
+  assert.equal(itemMatchesKeyword({ title: '普通人用AI工具创业' }, 'AI'), true);
+  assert.equal(itemMatchesKeyword({ title: '三个搞钱方法' }, '搞钱'), true);
+  const result = applyKeywordSearchStandard([{
+    id: '7664212023937279080',
+    url: 'https://www.douyin.com/video/7664212023937279080',
+    title: '#haerin 回归',
+    red_heart_count: 2046,
+    publish_time: '2026-07-19T12:16:59.000Z'
+  }], { keyword: 'AI', capturedAt: '2026-07-20T12:00:00.000Z' });
+  assert.equal(result.standard.irrelevant_keyword_count, 1);
+  assert.equal(result.qualified_items.length, 0);
+});
+
+test('resume-current never retries by submitting the same keyword again', () => {
+  assert.equal(keywordSearchAttemptLimit(true), 1);
+  assert.equal(keywordSearchAttemptLimit(false), 2);
 });
 
 test('keyword search standard stops at 1 qualified item or 200 scanned items', () => {
@@ -217,6 +240,67 @@ test('qualified item transaction applies ingestion before browser back and verif
   });
   assert.equal(result.processed, true);
   assert.deepEqual(events, ['open', 'ingest', 'back', 'restore-scroll']);
+});
+
+test('qualified item transaction returns through browser history when a note adds a second detail entry', async () => {
+  const events = [];
+  let page = 'search';
+  const client = {
+    async evaluate(expression) {
+      if (expression.includes('const anchor =')) {
+        page = 'detail';
+        events.push('open');
+        return { ok: true, href: 'https://www.douyin.com/search/%23AI', scroll_top: 88 };
+      }
+      if (expression.includes("history.back()")) {
+        page = 'note';
+        events.push('back');
+        return undefined;
+      }
+      if (expression.includes('ready: location.href.includes')) {
+        return { href: 'https://www.douyin.com/note/7611095597914918153', ready: page === 'detail' };
+      }
+      if (expression.includes("const input =")) {
+        return page === 'search'
+          ? { href: 'https://www.douyin.com/search/%23AI', value: '#AI' }
+          : { href: 'https://www.douyin.com/note/7611095597914918153', value: '' };
+      }
+      if (expression.includes('root.scrollTop =')) {
+        events.push('restore-scroll');
+        return undefined;
+      }
+      throw new Error(`Unexpected expression: ${expression}`);
+    },
+    async send(method, params) {
+      if (method === 'Page.getNavigationHistory') {
+        return {
+          currentIndex: 1,
+          entries: [
+            { id: 1, url: 'https://www.douyin.com/search/%23AI' },
+            { id: 2, url: 'https://www.douyin.com/note/7611095597914918153' },
+          ],
+        };
+      }
+      if (method === 'Page.navigateToHistoryEntry' && params.entryId === 1) {
+        page = 'search';
+        events.push('history-entry-back');
+        return {};
+      }
+      throw new Error(`Unexpected CDP command: ${method}`);
+    },
+  };
+  const result = await processQualifiedItemTransaction(client, {
+    id: '7611095597914918153',
+    url: 'https://www.douyin.com/video/7611095597914918153',
+  }, {
+    searchQuery: '#AI',
+    onQualified: async () => {
+      events.push('ingest');
+      return { applied: true };
+    },
+  });
+  assert.equal(result.processed, true);
+  assert.deepEqual(events, ['open', 'ingest', 'back', 'history-entry-back', 'restore-scroll']);
 });
 
 test('yt-dlp audio args use the dedicated Chrome profile and selected audio-only format', () => {

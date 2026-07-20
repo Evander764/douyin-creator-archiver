@@ -103,6 +103,21 @@ async function openQualifiedVideo(client, item, searchQuery) {
 
 async function backToSearchResults(client, origin) {
   await client.evaluate('history.back()');
+  if (typeof client.send === 'function') {
+    try {
+      const history = await client.send('Page.getNavigationHistory');
+      const target = [...(history?.entries || [])].reverse().find((entry) => {
+        let decoded = entry.url || '';
+        try { decoded = decodeURIComponent(decoded); } catch {}
+        return entry.url === origin.href
+          || (/\/(?:jingxuan\/)?search\//.test(new URL(entry.url).pathname)
+            && decoded.includes(origin.search_query));
+      });
+      if (target && target.id !== history?.entries?.[history.currentIndex]?.id) {
+        await client.send('Page.navigateToHistoryEntry', { entryId: target.id });
+      }
+    } catch {}
+  }
   const deadline = Date.now() + 30000;
   let last = null;
   while (Date.now() < deadline) {
@@ -218,6 +233,21 @@ function numericMetric(value) {
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
 }
 
+export function itemMatchesKeyword(item, keyword = '') {
+  const needle = compact(keyword).replace(/^#+/, '').normalize('NFKC').toLowerCase();
+  if (!needle) return true;
+  const haystack = `${item?.title || ''} ${item?.description || ''}`.normalize('NFKC').toLowerCase();
+  if (/^[a-z0-9]+$/.test(needle)) {
+    const escaped = needle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return new RegExp(`(^|[^a-z0-9])${escaped}(?=$|[^a-z0-9])`, 'i').test(haystack);
+  }
+  return haystack.includes(needle);
+}
+
+export function keywordSearchAttemptLimit(resumeCurrent = false) {
+  return resumeCurrent ? 1 : 2;
+}
+
 export function applyKeywordSearchStandard(items = [], {
   keyword = '',
   minRedHearts = 1000,
@@ -233,6 +263,7 @@ export function applyKeywordSearchStandard(items = [], {
   const scannedItems = [];
   const qualified = [];
   const counters = {
+    irrelevant_keyword_count: 0,
     missing_red_heart_count: 0,
     red_heart_at_or_below_count: 0,
     missing_publish_time_count: 0,
@@ -244,13 +275,15 @@ export function applyKeywordSearchStandard(items = [], {
     const publishTimeMs = Date.parse(item.publish_time || '');
     const hasPublishTime = Number.isFinite(publishTimeMs);
     const withinWindow = hasPublishTime && publishTimeMs >= cutoffMs && publishTimeMs <= capturedAtMs + (5 * 60 * 1000);
+    const keywordRelevant = itemMatchesKeyword(item, keyword);
+    if (!keywordRelevant) counters.irrelevant_keyword_count += 1;
     if (redHeartCount === null) counters.missing_red_heart_count += 1;
     else if (redHeartCount <= minRedHearts) counters.red_heart_at_or_below_count += 1;
     if (!hasPublishTime) counters.missing_publish_time_count += 1;
     else if (!withinWindow) counters.outside_time_window_count += 1;
     const normalized = { ...item, keyword, red_heart_count: redHeartCount };
     scannedItems.push(normalized);
-    if (redHeartCount !== null && redHeartCount > minRedHearts && withinWindow) qualified.push(normalized);
+    if (keywordRelevant && redHeartCount !== null && redHeartCount > minRedHearts && withinWindow) qualified.push(normalized);
   }
   return {
     scanned_items: scannedItems,
@@ -656,7 +689,7 @@ export async function collectKeywordSearchBatch({
         capturedAt,
       });
       let stopReason = 'no_search_response';
-      for (let attempt = 1; attempt <= 2; attempt += 1) {
+      for (let attempt = 1; attempt <= keywordSearchAttemptLimit(resumeThisKeyword); attempt += 1) {
         searchAttempts = attempt;
         if (attempt > 1) {
           onProgress?.({ phase: 'keyword_retry', keyword, attempt });
