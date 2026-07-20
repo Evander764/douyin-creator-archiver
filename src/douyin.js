@@ -545,6 +545,7 @@ async function scrollSearchResults(client) {
       target.scrollTop = Math.min(target.scrollHeight, target.scrollTop + Math.max(target.clientHeight * 2.5, 1600));
       target.dispatchEvent(new Event('scroll', { bubbles: true }));
       const after = target.scrollTop;
+      const tailText = String(target.innerText || '').slice(-500);
       return {
         ok: true,
         target: target === root ? 'document' : 'nested',
@@ -552,6 +553,7 @@ async function scrollSearchResults(client) {
         after,
         moved: after > before,
         at_end: after + target.clientHeight >= target.scrollHeight - 8,
+        explicit_end: /暂时没有更多了|没有更多内容|已经到底了/.test(tailText),
         scroll_height: target.scrollHeight,
         client_height: target.clientHeight,
       };
@@ -690,6 +692,10 @@ export async function collectKeywordSearchBatch({
           debugSearch(`scroll keyword=${keyword} ok=${scroll?.ok} before=${scroll?.before ?? 'n/a'} after=${scroll?.after ?? 'n/a'}`);
           if (!scroll?.ok) throw new Error(`Douyin search scroll failed: ${scroll?.reason || 'unknown'}`);
           await sleep(Math.max(500, Number(scrollDelayMs || 0)));
+          if (scroll.explicit_end) {
+            stopReason = 'results_exhausted';
+            break;
+          }
           stableRounds = observed.size === before && scroll.at_end && !scroll.moved ? stableRounds + 1 : 0;
           if (stableRounds >= 3) {
             stopReason = 'results_exhausted';
