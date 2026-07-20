@@ -1,6 +1,6 @@
 # 抖音博主归档代码：快速开始
 
-这是 macOS 源码工具，不是桌面应用。它可以读取公开视频的标题、发布时间、点赞、收藏、评论、分享、封面，下载视频或音频，并可用本地 Whisper 生成人声逐字稿。
+这是 macOS 源码工具，不是桌面应用。默认只把点赞（红心）达到 `1000` 的公开视频纳入最终结果；正好 `1000` 也算达标。点赞缺失不会按 0 处理，而是标记为无法判定并排除。
 
 ## 1. 安装依赖
 
@@ -32,13 +32,16 @@ dyca login
 dyca list \
   --creator-url "https://www.douyin.com/user/..." \
   --out ./output \
-  --limit 50
+  --limit 50 \
+  --min-likes 1000
 ```
 
 查看：
 
 - `output/creator-videos.jsonl`
 - `output/logs/list-report.json`
+
+`list-report.json.like_standard` 会记录观察数量、达标数量、低于 1000 的数量和点赞缺失数量。`creator-videos.jsonl` 只保留达标视频。
 
 只有同时满足以下条件才会写入 `complete: true`：代码监听到了主页自己的分页响应、分页明确返回 `has_more=false`，并且没有先撞到 `--limit`。`complete: false` 表示当前只确认抓到了这些视频，不能宣称已经穷尽博主全部作品。
 
@@ -49,6 +52,7 @@ dyca archive \
   --creator-url "https://www.douyin.com/user/..." \
   --out ./output \
   --limit 50 \
+  --min-likes 1000 \
   --mode audio \
   --transcribe true \
   --whisper-model "/绝对路径/ggml-small-q5_1.bin"

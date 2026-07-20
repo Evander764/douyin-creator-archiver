@@ -27,10 +27,58 @@ function usage() {
 Usage:
   dyca doctor
   dyca login [--profile-dir PATH] [--port 9533]
-  dyca list --creator-url URL [--out DIR] [--limit N]
-  dyca archive --creator-url URL [--out DIR] [--limit N] [--mode audio|video|both] [--transcribe true --whisper-model PATH]
-  dyca archive-urls --input ROWS.jsonl [--out DIR] [--limit N] [--mode audio|video|both] [--transcribe true --whisper-model PATH]
+  dyca list --creator-url URL [--out DIR] [--limit N] [--min-likes 1000]
+  dyca archive --creator-url URL [--out DIR] [--limit N] [--min-likes 1000] [--mode audio|video|both] [--transcribe true --whisper-model PATH]
+  dyca archive-urls --input ROWS.jsonl [--out DIR] [--limit N] [--min-likes 1000] [--mode audio|video|both] [--transcribe true --whisper-model PATH]
 `;
+}
+
+function minimumLikes(args) {
+  const value = Number(args['min-likes'] ?? 1000);
+  if (!Number.isFinite(value) || value < 0) throw new Error('--min-likes must be a non-negative number');
+  return Math.floor(value);
+}
+
+function numericLikeCount(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const parsed = Number(String(value).replace(/,/g, '').trim());
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
+}
+
+export function filterByMinimumLikes(videos = [], threshold = 1000) {
+  const qualified = [];
+  let belowThreshold = 0;
+  let missingLikeCount = 0;
+  for (const video of videos) {
+    const likeCount = numericLikeCount(video.like_count);
+    if (likeCount === null) {
+      missingLikeCount += 1;
+    } else if (likeCount < threshold) {
+      belowThreshold += 1;
+    } else {
+      qualified.push({ ...video, like_count: likeCount });
+    }
+  }
+  return {
+    videos: qualified,
+    standard: {
+      field: 'like_count',
+      operator: '>=',
+      minimum: threshold,
+      observed_count: videos.length,
+      qualified_count: qualified.length,
+      below_threshold_count: belowThreshold,
+      missing_like_count: missingLikeCount,
+    },
+  };
+}
+
+function applyLikeStandard(snapshot, threshold) {
+  const filtered = filterByMinimumLikes(snapshot.videos, threshold);
+  return {
+    videos: filtered.videos,
+    listing: { ...snapshot.listing, like_standard: filtered.standard },
+  };
 }
 
 function commonOptions(args) {
@@ -121,6 +169,7 @@ async function commandList(args) {
   const outDir = resolve(String(args.out || './douyin-archive'));
   const limit = Math.max(1, Math.min(Number(args.limit || 100), 5000));
   const scrollRounds = Math.max(1, Math.min(Number(args['scroll-rounds'] || 80), 500));
+  const minLikes = minimumLikes(args);
   const options = commonOptions(args);
   ensureDir(options.profileDir);
   const snapshot = await collectCreatorSnapshot({
@@ -130,8 +179,9 @@ async function commandList(args) {
     ...options,
     onProgress: logCollectionProgress,
   });
-  writeVideoIndex(outDir, snapshot.videos, snapshot.listing);
-  console.log(JSON.stringify({ ok: true, count: snapshot.videos.length, listing: snapshot.listing, outDir }, null, 2));
+  const selected = applyLikeStandard(snapshot, minLikes);
+  writeVideoIndex(outDir, selected.videos, selected.listing);
+  console.log(JSON.stringify({ ok: true, count: selected.videos.length, listing: selected.listing, outDir }, null, 2));
 }
 
 async function commandArchive(args) {
@@ -141,6 +191,7 @@ async function commandArchive(args) {
   if (!['audio', 'video', 'both'].includes(mode)) throw new Error('--mode must be audio, video, or both');
   const limit = Math.max(1, Math.min(Number(args.limit || 100), 5000));
   const delayMs = Math.max(0, Number(args['delay-ms'] || 2500));
+  const minLikes = minimumLikes(args);
   const options = commonOptions(args);
   const snapshot = await collectCreatorSnapshot({
     creatorUrl,
@@ -149,13 +200,14 @@ async function commandArchive(args) {
     ...options,
     onProgress: logCollectionProgress,
   });
+  const selected = applyLikeStandard(snapshot, minLikes);
   const report = await archiveVideoRows({
-    videos: snapshot.videos,
+    videos: selected.videos,
     outDir,
     mode,
     delayMs,
     options,
-    origin: { command: 'archive', creatorUrl, listing: snapshot.listing },
+    origin: { command: 'archive', creatorUrl, listing: selected.listing },
     downloadCovers: parseBool(args.covers, true),
     transcribe: parseBool(args.transcribe, false),
     whisperModelPath: String(args['whisper-model'] || process.env.DYCA_WHISPER_MODEL || ''),
@@ -287,19 +339,22 @@ async function commandArchiveUrls(args) {
   if (!['audio', 'video', 'both'].includes(mode)) throw new Error('--mode must be audio, video, or both');
   const limit = Math.max(1, Math.min(Number(args.limit || 100), 5000));
   const delayMs = Math.max(0, Number(args['delay-ms'] || 2500));
+  const minLikes = minimumLikes(args);
   const options = commonOptions(args);
   const rows = readJsonlRows(inputPath);
-  const videos = rowsToVideos(rows, {
+  const candidates = rowsToVideos(rows, {
     urlField: String(args['url-field'] || 'source_url'),
     titleField: String(args['title-field'] || 'title'),
-  }).slice(0, limit);
+  });
+  const filtered = filterByMinimumLikes(candidates, minLikes);
+  const videos = filtered.videos.slice(0, limit);
   const report = await archiveVideoRows({
     videos,
     outDir,
     mode,
     delayMs,
     options,
-    origin: { command: 'archive-urls', inputPath },
+    origin: { command: 'archive-urls', inputPath, like_standard: { ...filtered.standard, selected_count: videos.length } },
     downloadCovers: parseBool(args.covers, true),
     transcribe: parseBool(args.transcribe, false),
     whisperModelPath: String(args['whisper-model'] || process.env.DYCA_WHISPER_MODEL || ''),

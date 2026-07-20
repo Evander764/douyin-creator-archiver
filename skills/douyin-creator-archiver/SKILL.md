@@ -45,13 +45,13 @@ Ask the user to finish login or verification in the opened Chrome window.
 3. List videos first:
 
 ```bash
-dyca list --creator-url "<creator profile URL>" --out ./douyin-archive --limit 50
+dyca list --creator-url "<creator profile URL>" --out ./douyin-archive --limit 50 --min-likes 1000
 ```
 
 4. Archive metadata, covers, media, and optional voice transcripts from a creator:
 
 ```bash
-dyca archive --creator-url "<creator profile URL>" --out ./douyin-archive --limit 50 --mode audio --transcribe true --whisper-model /absolute/model.bin
+dyca archive --creator-url "<creator profile URL>" --out ./douyin-archive --limit 50 --min-likes 1000 --mode audio --transcribe true --whisper-model /absolute/model.bin
 ```
 
 Use `--mode both` when the user explicitly wants video files and audio files.
@@ -80,6 +80,7 @@ Default JSONL fields are `source_url` and `title`. Use `--url-field` or `--title
 - Chrome path: `/Applications/Google Chrome.app/Contents/MacOS/Google Chrome`
 - Output folder: `./douyin-archive`
 - Run style: serial stable mode
+- Qualification: `like_count >= 1000`; missing like counts are excluded
 
 ## Troubleshooting
 

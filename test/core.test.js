@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parseArgs, sanitizeSegment } from '../src/utils.js';
 import { normalizeStructuredVideo, normalizeVideoUrl, parseCreatorPostPayload, parseDouyinVideoId } from '../src/douyin.js';
-import { writeArchiveReport } from '../src/cli.js';
+import { filterByMinimumLikes, writeArchiveReport } from '../src/cli.js';
 
 test('parseDouyinVideoId supports video and modal urls', () => {
   assert.equal(parseDouyinVideoId('https://www.douyin.com/video/7611095597914918153'), '7611095597914918153');
@@ -72,4 +72,18 @@ test('parseCreatorPostPayload preserves cursor exhaustion evidence', () => {
   assert.equal(page.items[0].favorite_count, 2);
   assert.equal(page.has_more, false);
   assert.equal(page.cursor, 123);
+});
+
+test('1000-like standard is inclusive and excludes missing metrics', () => {
+  const result = filterByMinimumLikes([
+    { id: 'a', like_count: 999 },
+    { id: 'b', like_count: 1000 },
+    { id: 'c', like_count: '1,200' },
+    { id: 'd', like_count: null },
+  ], 1000);
+  assert.deepEqual(result.videos.map((item) => item.id), ['b', 'c']);
+  assert.equal(result.standard.minimum, 1000);
+  assert.equal(result.standard.qualified_count, 2);
+  assert.equal(result.standard.below_threshold_count, 1);
+  assert.equal(result.standard.missing_like_count, 1);
 });

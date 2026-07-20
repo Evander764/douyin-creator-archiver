@@ -9,6 +9,7 @@ It provides:
 - Serial, stable browser automation through Chrome DevTools Protocol.
 - Creator-page video discovery.
 - Per-video structured metadata: title, publish time, likes, favorites, comments, shares, cover URL, and duration.
+- A default qualification standard of `like_count >= 1000`; missing like counts are excluded rather than treated as zero.
 - Known video URL archiving for upstream ingest queues.
 - Cover download, video download, and optional audio extraction.
 - Optional local Whisper voice transcription.
@@ -62,6 +63,7 @@ dyca archive \
   --creator-url "https://www.douyin.com/user/..." \
   --out ./douyin-archive \
   --limit 50 \
+  --min-likes 1000 \
   --mode both \
   --transcribe true \
   --whisper-model /absolute/path/to/ggml-small-q5_1.bin
@@ -114,9 +116,9 @@ douyin-archive/
 ```bash
 dyca doctor
 dyca login [--profile-dir PATH] [--port 9533]
-dyca list --creator-url URL [--out DIR] [--limit N] [--scroll-rounds N]
-dyca archive --creator-url URL [--out DIR] [--limit N] [--mode audio|video|both]
-dyca archive-urls --input ROWS.jsonl [--out DIR] [--limit N] [--mode audio|video|both]
+dyca list --creator-url URL [--out DIR] [--limit N] [--min-likes N] [--scroll-rounds N]
+dyca archive --creator-url URL [--out DIR] [--limit N] [--min-likes N] [--mode audio|video|both]
+dyca archive-urls --input ROWS.jsonl [--out DIR] [--limit N] [--min-likes N] [--mode audio|video|both]
 ```
 
 Important options:
@@ -125,6 +127,7 @@ Important options:
 - `--chrome-path`: Chrome executable path. Defaults to `/Applications/Google Chrome.app/Contents/MacOS/Google Chrome`.
 - `--port`: CDP port. Defaults to `9533`.
 - `--delay-ms`: delay between videos. Defaults to `2500`.
+- `--min-likes`: minimum red-heart/like count. Defaults to `1000` and is inclusive. Missing values are excluded.
 - `--visible false`: run Chrome without `--new-window` visibility hints. Login still requires visible Chrome.
 - `--covers false`: skip cover downloads. Covers are downloaded by default.
 - `--transcribe true`: generate voice transcripts with local `whisper-cli`.
@@ -150,6 +153,8 @@ Each `creator-videos.jsonl` row can include:
 ## Completeness Boundary
 
 `logs/list-report.json` records how creator discovery stopped. The collector watches the creator page's own `aweme/post` responses while scrolling and records `cursor` plus `has_more`. It sets `complete: true` only when pagination was observed, `has_more=false`, and the requested `--limit` did not stop the run first. Otherwise `observed_count` remains non-authoritative.
+
+The final `creator-videos.jsonl` contains only videos meeting `like_count >= --min-likes`. `logs/list-report.json.like_standard` records observed, qualified, below-threshold, and missing-metric counts. Account completeness and threshold qualification are separate: a threshold result is authoritative for the full account only when `complete=true`.
 
 Voice transcripts cover spoken audio only. Text visible in silent frames, slides, or burned-in subtitles requires a separate OCR pass.
 

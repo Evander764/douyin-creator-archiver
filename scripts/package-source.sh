@@ -17,6 +17,7 @@ trap cleanup EXIT
 mkdir -p "$stage_dir" "$dist_dir"
 rsync -a \
   --exclude '.git' \
+  --exclude '.DS_Store' \
   --exclude 'dist' \
   --exclude 'node_modules' \
   --exclude 'douyin-archive*' \

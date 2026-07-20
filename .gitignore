@@ -2,6 +2,7 @@
 node_modules/
 coverage/
 dist/
+.DS_Store
 .data/
 archive/
 douyin-archive/
