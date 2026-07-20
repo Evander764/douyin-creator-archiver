@@ -559,7 +559,8 @@ async function scrollSearchResults(client) {
         })
         .sort((a, b) => b.clientHeight - a.clientHeight);
       const root = document.scrollingElement || document.documentElement;
-      const target = candidates[0] || (root.scrollHeight > root.clientHeight + 200 ? root : null);
+      const rootScrollable = root.scrollHeight > Math.max(root.clientHeight, innerHeight) + 200;
+      const target = rootScrollable ? root : candidates[0];
       if (!target) return { ok: false, reason: 'scroll_container_not_found', at_end: true };
       const before = target.scrollTop;
       target.scrollTop = Math.min(target.scrollHeight, target.scrollTop + Math.max(target.clientHeight * 2.5, 1600));
